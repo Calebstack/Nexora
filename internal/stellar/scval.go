@@ -115,6 +115,36 @@ func U64ScVal(v uint64) xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvU64, U64: &u}
 }
 
+// SymbolScVal encodes a symbol contract argument, such as a unit enum variant.
+func SymbolScVal(s string) xdr.ScVal {
+	sym := xdr.ScSymbol(s)
+	return xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+}
+
+// VecScVal encodes a contract Vec argument.
+func VecScVal(items []xdr.ScVal) xdr.ScVal {
+	vec := xdr.ScVec(items)
+	vecPtr := &vec
+	return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &vecPtr}
+}
+
+// StructScVal encodes a contract struct argument. Soroban requires map keys
+// in sorted order, so fields must be passed sorted by name.
+func StructScVal(names []string, values []xdr.ScVal) xdr.ScVal {
+	entries := make(xdr.ScMap, 0, len(names))
+	for i, name := range names {
+		entries = append(entries, xdr.ScMapEntry{Key: SymbolScVal(name), Val: values[i]})
+	}
+	mapPtr := &entries
+	return xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &mapPtr}
+}
+
+// BytesScVal encodes a Bytes/BytesN contract argument.
+func BytesScVal(b []byte) xdr.ScVal {
+	bytes := xdr.ScBytes(b)
+	return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &bytes}
+}
+
 // DecodeI128 reads a signed 128-bit integer out of a contract return value.
 func DecodeI128(v xdr.ScVal) (*big.Int, error) {
 	parts, ok := v.GetI128()
