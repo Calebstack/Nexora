@@ -55,6 +55,25 @@ jobs:
           version: v1.61
           args: --timeout=5m
 
+  soroban-invariants:
+    name: Soroban invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run invariant suites
+        run: make test-soroban
+
+      - name: Upload invariant reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: invariant-reports
+          path: contracts/soroban/tests/invariants/target/invariant-reports/
+
   openapi:
     name: OpenAPI contract
     runs-on: ubuntu-latest

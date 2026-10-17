@@ -78,7 +78,7 @@ impl PaymentStream {
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(
             &sender,
-            &Address::from_contract_id(&env, &env.current_contract_address()),
+            &env.current_contract_address(),
             &total_amount,
         );
 
@@ -95,7 +95,7 @@ impl PaymentStream {
             return Ok(0);
         }
 
-        let current_ledger = env.ledger().sequence();
+        let current_ledger = u64::from(env.ledger().sequence());
 
         if current_ledger <= stream.start_ledger {
             return Ok(0);
@@ -145,7 +145,7 @@ impl PaymentStream {
 
         let token_client = token::Client::new(&env, &stream.asset);
         token_client.transfer(
-            &Address::from_contract_id(&env, &env.current_contract_address()),
+            &env.current_contract_address(),
             &stream.recipient,
             &amount,
         );
@@ -175,7 +175,7 @@ impl PaymentStream {
         stream.cancelled = true;
 
         let token_client = token::Client::new(&env, &stream.asset);
-        let contract_address = Address::from_contract_id(&env, &env.current_contract_address());
+        let contract_address = env.current_contract_address();
 
         if claimable > 0 {
             token_client.transfer(&contract_address, &stream.recipient, &claimable);

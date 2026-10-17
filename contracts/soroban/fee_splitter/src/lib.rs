@@ -105,7 +105,7 @@ impl FeeSplitter {
         }
 
         let token_client = token::Client::new(&env, &asset);
-        let contract_address = Address::from_contract_id(&env, &env.current_contract_address());
+        let contract_address = env.current_contract_address();
 
         let mut remaining = amount;
         for (idx, beneficiary) in beneficiaries.iter().enumerate() {
@@ -122,7 +122,7 @@ impl FeeSplitter {
 
             remaining -= share_i128;
 
-            if remaining <= 0 && idx < beneficiaries.len() - 1 {
+            if remaining <= 0 && idx + 1 < beneficiaries.len() as usize {
                 break;
             }
         }
@@ -132,7 +132,7 @@ impl FeeSplitter {
         }
 
         env.events().publish(
-            (symbol_short!("FeeSplitEx"),),
+            (symbol_short!("fee_split"),),
             (amount, beneficiaries.len()),
         );
 
@@ -169,7 +169,7 @@ impl FeeSplitter {
         storage.set(&DataKey::Beneficiaries, &beneficiaries);
 
         env.events().publish(
-            (symbol_short!("BeneficiaryUpd"),),
+            (symbol_short!("ben_upd"),),
             beneficiaries.len(),
         );
 

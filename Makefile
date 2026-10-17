@@ -1,4 +1,4 @@
-.PHONY: run-api run-worker migrate migrate-down test lint fmt-check format-check typecheck build tidy generate openapi-check openapi-manifest clean deploy-primary deploy-secondary failover
+.PHONY: run-api run-worker migrate migrate-down test test-soroban lint fmt-check format-check typecheck build tidy generate openapi-check openapi-manifest clean deploy-primary deploy-secondary failover
 
 # Run the API server
 run-api:
@@ -20,8 +20,14 @@ migrate-down:
 	migrate -path db/migrations -database "$$DATABASE_URL" down 1
 
 # Run all tests with race detector
-test:
+test: test-soroban
 	go test ./... -race -count=1 -timeout 60s
+
+# Property-based invariant suites for the Soroban contracts. Set
+# INVARIANT_SEED to replay a failure; failure reports are written to
+# contracts/soroban/tests/invariants/target/invariant-reports/.
+test-soroban:
+	cargo test --manifest-path contracts/soroban/tests/invariants/Cargo.toml
 
 # Run tests with coverage
 test-cover:

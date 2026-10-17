@@ -81,7 +81,7 @@ impl Escrow {
         storage.set(&DataKey::Escrow, &escrow);
 
         let token_client = token::Client::new(&env, &asset);
-        token_client.transfer(&sender, &Address::from_contract_id(&env, &env.current_contract_address()), &amount);
+        token_client.transfer(&sender, &env.current_contract_address(), &amount);
 
         Ok(())
     }
@@ -97,7 +97,7 @@ impl Escrow {
             return Err(EscrowError::AlreadyReleased);
         }
 
-        let current_ledger = env.ledger().sequence();
+        let current_ledger = u64::from(env.ledger().sequence());
         if current_ledger > escrow.deadline {
             return Err(EscrowError::DeadlineExceeded);
         }
@@ -116,7 +116,7 @@ impl Escrow {
             escrow.released = true;
             let token_client = token::Client::new(&env, &escrow.asset);
             token_client.transfer(
-                &Address::from_contract_id(&env, &env.current_contract_address()),
+                &env.current_contract_address(),
                 &escrow.recipient,
                 &escrow.amount,
             );
@@ -137,7 +137,7 @@ impl Escrow {
             return Err(EscrowError::AlreadyReleased);
         }
 
-        let current_ledger = env.ledger().sequence();
+        let current_ledger = u64::from(env.ledger().sequence());
         if current_ledger <= escrow.deadline {
             return Err(EscrowError::DeadlineExceeded);
         }
@@ -147,7 +147,7 @@ impl Escrow {
         escrow.released = true;
         let token_client = token::Client::new(&env, &escrow.asset);
         token_client.transfer(
-            &Address::from_contract_id(&env, &env.current_contract_address()),
+            &env.current_contract_address(),
             &escrow.sender,
             &escrow.amount,
         );
