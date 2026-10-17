@@ -1,4 +1,8 @@
+#![no_std]
+
 use soroban_sdk::Env;
+
+pub mod guard;
 
 pub enum StorageType {
     Persistent,
@@ -21,8 +25,8 @@ impl StorageOptimizer {
         ((data_size + 31) / 32) as u32
     }
 
-    pub fn extend_storage_ttl(env: &Env, extension_ledgers: u64) {
-        let ttl = env.storage().persistent().extend_ttl(extension_ledgers, extension_ledgers);
+    pub fn extend_storage_ttl(env: &Env, extension_ledgers: u32) {
+        env.storage().instance().extend_ttl(extension_ledgers, extension_ledgers);
     }
 }
 

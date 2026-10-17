@@ -26,6 +26,8 @@ const (
 
 	EventAPIKeyRotationReminder = "api_key.rotation_reminder"
 	EventAPIKeyExpired          = "api_key.expired"
+
+	EventContractEventEmitted = "contract.event.emitted"
 )
 
 var SupportedEventTypes = []string{
@@ -44,6 +46,7 @@ var SupportedEventTypes = []string{
 	EventClaimableBalanceRevoked,
 	EventAPIKeyRotationReminder,
 	EventAPIKeyExpired,
+	EventContractEventEmitted,
 }
 
 func IsSupportedEventType(eventType string) bool {
