@@ -11,6 +11,7 @@ import (
 
 	"github.com/Lumen-Nexora/Nexora/internal/alerting"
 	"github.com/Lumen-Nexora/Nexora/internal/assets"
+	"github.com/Lumen-Nexora/Nexora/internal/audit"
 	"github.com/Lumen-Nexora/Nexora/internal/claimable"
 	"github.com/Lumen-Nexora/Nexora/internal/compliance"
 	"github.com/Lumen-Nexora/Nexora/internal/config"
@@ -157,6 +158,22 @@ func main() {
 			log.Error().Err(err).Msg("indexer: stream all wallets failed")
 		}
 	}()
+
+	// Commit the daily Merkle root of the audit trail to the on-chain
+	// attestation contract at midnight UTC. Off unless a contract is configured.
+	if cfg.AuditAttestationContractID != "" {
+		attestationDaemon := audit.NewAttestationDaemon(
+			postgres.NewAuditRepo(repoDB),
+			audit.NewSorobanCommitter(
+				stellar.NewSorobanClient(cfg.SorobanRPCURL, cfg.StellarLiveNetwork),
+				signer,
+				cfg.AuditAttestationContractID,
+				cfg.AuditAttestationMaintainer,
+				cfg.AuditAttestationEncryptedSecret,
+			),
+		)
+		go attestationDaemon.Run(ctx)
+	}
 
 	alertClient := alerting.NewClient(cfg.AlertWebhookURL, "nexora-worker")
 	asynqOpt, err := queue.AsynqRedisOptions(cfg.RedisURL, cfg.RedisSentinelMasterName, cfg.RedisSentinelAddrs, cfg.RedisSentinelPassword)

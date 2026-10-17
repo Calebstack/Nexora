@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/Lumen-Nexora/Nexora/internal/domain"
 	"github.com/google/uuid"
@@ -127,4 +128,41 @@ func (r *AuditRepo) List(ctx context.Context, tenantID string, mode domain.Mode,
 		events = append(events, e)
 	}
 	return events, total, rows.Err()
+}
+
+// ListBetween returns every audit event created in [from, to) across all
+// tenants and modes, oldest first. The attestation daemon uses it to build the
+// daily Merkle root, so the order is fixed by created_at and id.
+func (r *AuditRepo) ListBetween(ctx context.Context, from, to time.Time) ([]*domain.AuditEvent, error) {
+	rows, err := r.db.Query(ctx,
+		`SELECT id, tenant_id, mode, actor_type, actor_id, action,
+		        resource_type, resource_id, metadata, ip_address, user_agent, created_at
+		 FROM tenant_audit_events
+		 WHERE created_at >= $1 AND created_at < $2
+		 ORDER BY created_at ASC, id ASC`,
+		from, to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query audit events between %s and %s: %w", from, to, err)
+	}
+	defer rows.Close()
+
+	var events []*domain.AuditEvent
+	for rows.Next() {
+		e := &domain.AuditEvent{}
+		var metaBytes []byte
+		var modeStr string
+		if err := rows.Scan(
+			&e.ID, &e.TenantID, &modeStr, &e.ActorType, &e.ActorID, &e.Action,
+			&e.ResourceType, &e.ResourceID, &metaBytes, &e.IPAddress, &e.UserAgent, &e.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		e.Mode = domain.Mode(modeStr)
+		if len(metaBytes) > 0 {
+			_ = json.Unmarshal(metaBytes, &e.Metadata)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
 }
