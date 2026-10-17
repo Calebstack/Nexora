@@ -184,3 +184,101 @@ func decodeAuthEntries(sim *protocol.SimulateTransactionResponse) ([]xdr.Soroban
 	}
 	return entries, nil
 }
+
+type EscrowContractBinding struct {
+	client       SorobanClient
+	contractID   string
+	sourceAccount string
+}
+
+func NewEscrowContractBinding(client SorobanClient, contractID, sourceAccount string) *EscrowContractBinding {
+	return &EscrowContractBinding{
+		client:        client,
+		contractID:    contractID,
+		sourceAccount: sourceAccount,
+	}
+}
+
+func (e *EscrowContractBinding) Initialize(ctx context.Context, asset, sender, recipient string, amount int64, threshold, signersCount uint32, deadline uint64) error {
+	op := &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{},
+	}
+
+	tx, err := e.client.PrepareInvocation(ctx, e.sourceAccount, op)
+	if err != nil {
+		return fmt.Errorf("prepare escrow initialize: %w", err)
+	}
+
+	_, err = e.client.SubmitTransaction(ctx, tx)
+	return err
+}
+
+type FeeSlitterContractBinding struct {
+	client        SorobanClient
+	contractID    string
+	sourceAccount string
+}
+
+func NewFeeSplitterContractBinding(client SorobanClient, contractID, sourceAccount string) *FeeSlitterContractBinding {
+	return &FeeSlitterContractBinding{
+		client:        client,
+		contractID:    contractID,
+		sourceAccount: sourceAccount,
+	}
+}
+
+func (f *FeeSlitterContractBinding) SplitFee(ctx context.Context, amount int64) error {
+	op := &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{},
+	}
+
+	tx, err := f.client.PrepareInvocation(ctx, f.sourceAccount, op)
+	if err != nil {
+		return fmt.Errorf("prepare fee splitter split: %w", err)
+	}
+
+	_, err = f.client.SubmitTransaction(ctx, tx)
+	return err
+}
+
+type PaymentStreamContractBinding struct {
+	client        SorobanClient
+	contractID    string
+	sourceAccount string
+}
+
+func NewPaymentStreamContractBinding(client SorobanClient, contractID, sourceAccount string) *PaymentStreamContractBinding {
+	return &PaymentStreamContractBinding{
+		client:        client,
+		contractID:    contractID,
+		sourceAccount: sourceAccount,
+	}
+}
+
+func (p *PaymentStreamContractBinding) Initialize(ctx context.Context, asset, sender, recipient string, amount int64, startLedger, endLedger uint64) error {
+	op := &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{},
+	}
+
+	tx, err := p.client.PrepareInvocation(ctx, p.sourceAccount, op)
+	if err != nil {
+		return fmt.Errorf("prepare payment stream initialize: %w", err)
+	}
+
+	_, err = p.client.SubmitTransaction(ctx, tx)
+	return err
+}
+
+func (p *PaymentStreamContractBinding) Withdraw(ctx context.Context, amount int64) error {
+	op := &txnbuild.InvokeHostFunction{
+		HostFunction: xdr.HostFunction{},
+	}
+
+	tx, err := p.client.PrepareInvocation(ctx, p.sourceAccount, op)
+	if err != nil {
+		return fmt.Errorf("prepare payment stream withdraw: %w", err)
+	}
+
+	_, err = p.client.SubmitTransaction(ctx, tx)
+	return err
+}
