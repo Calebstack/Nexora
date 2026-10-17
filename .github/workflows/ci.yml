@@ -262,3 +262,61 @@ jobs:
 
       - name: Test
         run: python -m pytest
+
+  soroban-gas:
+    name: Soroban gas profile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            contracts/soroban/target
+          key: soroban-gas-${{ hashFiles('contracts/soroban/Cargo.lock') }}
+
+      - name: Profile the base branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "origin/${{ github.base_ref }}"
+          if [ -f "$RUNNER_TEMP/base/contracts/soroban/gas_profile/Cargo.toml" ]; then
+            go run ./tools/gas_profiler \
+              -manifest "$RUNNER_TEMP/base/contracts/soroban/Cargo.toml" \
+              -markdown "$RUNNER_TEMP/base-gas-report.md" \
+              -json "$RUNNER_TEMP/base-gas-report.json"
+          else
+            echo "The base branch has no gas profile, skipping the regression comparison."
+          fi
+
+      - name: Profile and fail on gas regressions over 15%
+        run: |
+          baseline=""
+          if [ -f "$RUNNER_TEMP/base-gas-report.json" ]; then
+            baseline="-baseline $RUNNER_TEMP/base-gas-report.json -max-regression 15"
+          fi
+          go run ./tools/gas_profiler -markdown gas-report.md -json gas-report.json $baseline
+
+      - name: Publish the gas report
+        if: always()
+        run: |
+          if [ -f gas-report.md ]; then cat gas-report.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload the gas report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-gas-report
+          path: |
+            gas-report.md
+            gas-report.json
+          if-no-files-found: ignore

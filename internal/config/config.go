@@ -59,6 +59,9 @@ type Config struct {
 	OTELServiceName                 string
 	FXSpreadBps                     int
 	SorobanRPCURL                   string
+	AuditAttestationContractID      string
+	AuditAttestationMaintainer      string
+	AuditAttestationEncryptedSecret string
 	ContractWalletWasmHash          string
 	ContractWalletSpendingLimit     string
 	ContractWalletWindowSeconds     int
@@ -409,6 +412,9 @@ func Load() (*Config, error) {
 		OTELServiceName:                 viper.GetString("OTEL_SERVICE_NAME"),
 		FXSpreadBps:                     viper.GetInt("FX_SPREAD_BPS"),
 		SorobanRPCURL:                   viper.GetString("SOROBAN_RPC_URL"),
+		AuditAttestationContractID:      viper.GetString("AUDIT_ATTESTATION_CONTRACT_ID"),
+		AuditAttestationMaintainer:      viper.GetString("AUDIT_ATTESTATION_MAINTAINER"),
+		AuditAttestationEncryptedSecret: viper.GetString("AUDIT_ATTESTATION_ENCRYPTED_SECRET"),
 		ContractWalletWasmHash:          viper.GetString("CONTRACT_WALLET_WASM_HASH"),
 		ContractWalletSpendingLimit:     viper.GetString("CONTRACT_WALLET_SPENDING_LIMIT"),
 		ContractWalletWindowSeconds:     viper.GetInt("CONTRACT_WALLET_WINDOW_SECONDS"),

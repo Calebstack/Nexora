@@ -84,6 +84,26 @@ func StringScVal(s string) xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvString, Str: &str}
 }
 
+// U32ScVal encodes an unsigned 32-bit integer contract argument.
+func U32ScVal(v uint32) xdr.ScVal {
+	u := xdr.Uint32(v)
+	return xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &u}
+}
+
+// BytesScVal encodes a variable-length bytes contract argument. BytesN<N>
+// arguments use the same encoding.
+func BytesScVal(b []byte) xdr.ScVal {
+	v := xdr.ScBytes(append([]byte(nil), b...))
+	return xdr.ScVal{Type: xdr.ScValTypeScvBytes, Bytes: &v}
+}
+
+// VecScVal encodes a Vec contract argument.
+func VecScVal(items []xdr.ScVal) xdr.ScVal {
+	vec := xdr.ScVec(items)
+	vecPtr := &vec
+	return xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &vecPtr}
+}
+
 // VoidScVal encodes the `None` variant of a contract `Option<T>` argument.
 func VoidScVal() xdr.ScVal {
 	return xdr.ScVal{Type: xdr.ScValTypeScvVoid}

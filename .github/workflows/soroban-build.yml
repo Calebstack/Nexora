@@ -1,0 +1,138 @@
+name: Soroban build
+
+# Builds every Soroban contract in a pinned Docker toolchain, proves the build
+# is deterministic by building it twice, attests the artifacts' provenance and
+# attaches them to the release. A manual run can also verify a deployed
+# contract against the artifact built from the checked-out commit.
+
+on:
+  push:
+    tags: ['soroban-v*']
+  pull_request:
+    paths:
+      - 'contracts/soroban/**'
+      - 'tools/verify_wasm/**'
+      - '.github/workflows/soroban-build.yml'
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: 'Contract crate to verify against the chain'
+        required: false
+        type: choice
+        options: [attestation, bridge_adapter]
+      contract_id:
+        description: 'Deployed contract id (C...) to verify'
+        required: false
+        type: string
+      rpc_url:
+        description: 'Soroban RPC URL used to download the on-chain WASM'
+        required: false
+        default: https://mainnet.sorobanrpc.com
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.contract }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        contract: [attestation, bridge_adapter]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build twice without cache
+        run: |
+          for run in a b; do
+            docker buildx build --no-cache --platform linux/amd64 \
+              --target artifact \
+              --build-arg CONTRACT=${{ matrix.contract }} \
+              --output type=local,dest=out/$run \
+              -f contracts/soroban/Dockerfile contracts/soroban
+          done
+
+      - name: Check the build is deterministic
+        run: |
+          cmp out/a/${{ matrix.contract }}.wasm out/b/${{ matrix.contract }}.wasm
+          go run ./tools/verify_wasm -wasm out/a/${{ matrix.contract }}.wasm
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          cp out/a/${{ matrix.contract }}.wasm out/a/${{ matrix.contract }}.wasm.sha256 dist/
+
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ matrix.contract }}.wasm
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-${{ matrix.contract }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Attach to release
+    if: startsWith(github.ref, 'refs/tags/soroban-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wasm-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  verify-onchain:
+    name: Verify deployed contract
+    if: github.event_name == 'workflow_dispatch' && inputs.contract != '' && inputs.contract_id != ''
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-${{ inputs.contract }}
+          path: dist
+
+      - name: Compare with the on-chain WASM
+        run: |
+          go run ./tools/verify_wasm \
+            -rpc "${{ inputs.rpc_url }}" \
+            -contract "${{ inputs.contract_id }}" \
+            -wasm dist/${{ inputs.contract }}.wasm
