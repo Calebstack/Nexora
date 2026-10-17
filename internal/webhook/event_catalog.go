@@ -27,6 +27,7 @@ var eventCatalog = []EventCatalogEntry{
 	{"batch.completed", "All transfers in a batch have finished processing.", json.RawMessage(`{"batch_id":"bat_123","status":"completed","total":3,"succeeded":3,"failed":0}`)},
 	{domain.EventAPIKeyRotationReminder, "An API key is approaching its configured expiry.", json.RawMessage(`{"key_id":"key_123","expires_at":"2030-01-01T00:00:00Z"}`)},
 	{domain.EventAPIKeyExpired, "An API key has expired.", json.RawMessage(`{"key_id":"key_123","expired_at":"2030-01-01T00:00:00Z"}`)},
+	{domain.EventContractEventEmitted, "A Soroban contract emitted an event.", json.RawMessage(`{"id":"0000000000000000001-0000000001","contract_id":"CA3D5KRYM6CB7OWQ6TWYRR3Z4T7GNZLKERYNZGGA5SOAOPIFY6YQGAXE","event_type":"contract","topic":"transfer","topics":["transfer"],"data":"100","ledger":1234,"tx_hash":"abc123"}`)},
 }
 
 // ListEventCatalog returns the event contract catalogue. Search is performed
