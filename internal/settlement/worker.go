@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/Lumen-Nexora/Nexora/internal/domain"
 	"github.com/Lumen-Nexora/Nexora/internal/queue"
@@ -14,10 +15,17 @@ import (
 
 type Worker struct {
 	engine *Engine
+	poller *FallbackPoller
 }
 
 func NewWorker(engine *Engine) *Worker {
 	return &Worker{engine: engine}
+}
+
+// WithPoller attaches a FallbackPoller for telemetry and fallback coordination.
+func (w *Worker) WithPoller(poller *FallbackPoller) *Worker {
+	w.poller = poller
+	return w
 }
 
 func (w *Worker) HandleProcessTransfer(ctx context.Context, task *asynq.Task) error {
@@ -53,8 +61,17 @@ func (w *Worker) HandleProcessTransfer(ctx context.Context, task *asynq.Task) er
 
 	if err := w.engine.SubmitTransfer(ctx, payload.TransactionID); err != nil {
 		logger.Error().Err(err).Str("tx_id", payload.TransactionID).Msg("transfer submission failed")
-		_ = w.engine.txRepo.UpdateStatus(ctx, payload.TransactionID, domain.StatusFailed, "")
+		if w.poller != nil {
+			w.poller.RecordSubmissionFailure(err)
+		}
+		if !strings.Contains(err.Error(), "awaiting reconciliation") {
+			_ = w.engine.txRepo.UpdateStatus(ctx, payload.TransactionID, domain.StatusFailed, "")
+		}
 		return err
+	}
+
+	if w.poller != nil {
+		w.poller.RecordSubmissionSuccess()
 	}
 
 	logger.Info().Str("tx_id", payload.TransactionID).Msg("transfer confirmed")
