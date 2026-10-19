@@ -43,6 +43,7 @@ import (
 type Server struct {
 	router *chi.Mux
 	http   *http.Server
+	fx     *fx.Handler
 }
 
 func New(
@@ -305,7 +306,7 @@ func New(
 		IdleTimeout:  60 * time.Second,
 	}
 
-	return &Server{router: r, http: srv}
+	return &Server{router: r, http: srv, fx: fxHandler}
 }
 
 func (s *Server) Start() error {
@@ -313,6 +314,9 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.fx != nil {
+		s.fx.Close()
+	}
 	return s.http.Shutdown(ctx)
 }
 
