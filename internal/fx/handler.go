@@ -10,12 +10,13 @@ import (
 )
 
 type Handler struct {
-	svc  Service
-	idem func(http.Handler) http.Handler
+	svc    Service
+	stream *QuoteStream
+	idem   func(http.Handler) http.Handler
 }
 
 func NewHandler(svc Service) *Handler {
-	return &Handler{svc: svc}
+	return &Handler{svc: svc, stream: NewQuoteStream(svc)}
 }
 
 // WithIdempotency attaches the idempotency-key middleware to the
@@ -34,6 +35,7 @@ func (h *Handler) Routes() func(r chi.Router) {
 		}
 		convert("/convert", h.convert)
 		r.Get("/rates", h.getRates)
+		r.Get("/quotes/stream", h.streamQuotes)
 		r.Get("/catalog", h.getCatalog)
 	}
 }

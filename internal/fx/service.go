@@ -53,6 +53,7 @@ type service struct {
 	stellar        stellar.Client
 	redis          redis.UniversalClient
 	rateCache      *RateCache
+	volatility     *VolatilityEngine
 	usdcIssuer     string
 	providers      []Provider
 	spreadBps      int
@@ -104,6 +105,7 @@ func NewService(
 		stellar:        stellarClient,
 		redis:          redisClient,
 		rateCache:      NewRateCache(redisClient),
+		volatility:     NewVolatilityEngine(),
 		usdcIssuer:     usdcIssuer,
 		providers:      providers,
 		spreadBps:      spreadBps,
@@ -324,6 +326,23 @@ func (s *service) GetRates(ctx context.Context, from, to string) (*RateResponse,
 	return resp, nil
 }
 
+// GetLiveRates bypasses the read cache and fetches a fresh provider rate. It
+// is used by the shared SSE poller, so thousands of stream clients for a pair
+// still result in just one provider request per refresh interval.
+func (s *service) GetLiveRates(ctx context.Context, from, to string) (*RateResponse, error) {
+	from, to, err := validateFXPair(from, to)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.fetchRate(ctx, from, to)
+	if err != nil {
+		return nil, err
+	}
+	s.rateCache.Set(ctx, from, to, resp)
+	s.registerActivePair(from + ":" + to)
+	return resp, nil
+}
+
 func (s *service) fetchRate(ctx context.Context, from, to string) (*RateResponse, error) {
 	pairKey := from + "-" + to
 	var selected Provider
@@ -375,13 +394,15 @@ func (s *service) fetchRate(ctx context.Context, from, to string) (*RateResponse
 		}
 	}
 
-	spreadFactor := decimal.NewFromInt(int64(s.spreadBps)).Div(decimal.NewFromInt(10000))
-	finalRate := midRate.Mul(decimal.NewFromInt(1).Add(spreadFactor))
+	pair := from + ":" + to
+	volatility := s.volatility.Observe(pair, midRate.InexactFloat64(), time.Now().UTC())
+	multiplier := s.volatility.SpreadMultiplier(pair, volatility)
+	finalRate, adjustedSpreadBps := priceWithVolatility(midRate, s.spreadBps, multiplier)
 
 	return &RateResponse{
 		Rate:          finalRate,
 		MidMarketRate: midRate,
-		SpreadBps:     s.spreadBps,
+		SpreadBps:     adjustedSpreadBps,
 		Provider:      fmt.Sprintf("%T", selected),
 		CachedAt:      time.Now().UTC(),
 		Stale:         false,

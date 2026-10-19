@@ -1251,6 +1251,63 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /v1/fx/quotes/stream:
+    get:
+      operationId: streamFXQuotes
+      summary: Stream live FX quotes
+      description: >-
+        Opens a Server-Sent Events stream of fresh rate ticks. Multiple pairs
+        can share one connection. Each `rate` event contains a pair, a
+        RateResponse, and its emission timestamp; comment heartbeats keep
+        intermediaries and browser EventSource clients connected.
+      tags:
+      - FX
+      parameters:
+      - name: pairs
+        in: query
+        required: false
+        description: Comma-separated pairs in FROM:TO, FROM-TO, or FROM/TO form.
+        schema:
+          type: string
+          example: USDC:XLM,EURC:XLM
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: interval
+        in: query
+        required: false
+        description: Tick interval as a Go duration, from 100ms through 1h. Defaults to 1s.
+        schema:
+          type: string
+          example: 500ms
+      - name: heartbeat
+        in: query
+        required: false
+        description: SSE comment heartbeat interval, from 100ms through 1h. Defaults to 15s.
+        schema:
+          type: string
+          example: 15s
+      responses:
+        '200':
+          description: SSE stream of `rate` events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |-
+                event: rate
+                data: {"pair":"USDC:XLM","rate":{"rate":"34.5"},"at":"2026-10-19T12:00:00Z"}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /v1/schedules:
     post:
       operationId: createSchedule
