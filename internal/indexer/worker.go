@@ -10,9 +10,34 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+// TypeLedgerGapScan schedules one GapDetector pass over every tenant.
+const TypeLedgerGapScan = "indexer:ledger_gap_scan"
+
 type Worker struct {
 	indexer *Indexer
 	config  *config.Config
+	gaps    *GapDetector
+}
+
+// WithGapDetector enables HandleLedgerGapScan.
+func (w *Worker) WithGapDetector(d *GapDetector) *Worker {
+	w.gaps = d
+	return w
+}
+
+// HandleLedgerGapScan ingests new ledgers and backfills gaps for every tenant.
+func (w *Worker) HandleLedgerGapScan(ctx context.Context, task *asynq.Task) error {
+	ctx = queue.ContextFromTask(ctx, task)
+	ctx, span := tracing.StartConsumer(ctx, task.Type())
+	defer span.End()
+	if w.gaps == nil {
+		return nil
+	}
+	if err := w.gaps.ScanAll(ctx); err != nil {
+		tracing.Logger(ctx).Error().Err(err).Msg("ledger gap scan failed")
+		return err
+	}
+	return nil
 }
 
 func NewWorker(indexer *Indexer, cfg *config.Config) *Worker {
