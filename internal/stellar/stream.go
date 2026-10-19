@@ -46,7 +46,7 @@ func (s *PaymentStreamService) ClaimableBalance(ctx context.Context) (int64, err
 		HostFunction: xdr.HostFunction{},
 	}
 
-	result, err := s.client.SimulateInvocation(ctx, s.account, op)
+	_, err := s.client.SimulateInvocation(ctx, s.account, op)
 	if err != nil {
 		return 0, fmt.Errorf("simulate claimable balance query: %w", err)
 	}

@@ -38,6 +38,10 @@ func (m *mockFXService) GetRates(ctx context.Context, from, to string) (*RateRes
 	return nil, nil
 }
 
+func (m *mockFXService) BindQuoteToTransfer(ctx context.Context, tenantID, quoteID, transferID string) (*domain.Quote, error) {
+	return nil, nil
+}
+
 func TestHandler_GetQuote(t *testing.T) {
 	svc := &mockFXService{
 		getQuoteFunc: func(ctx context.Context, from, to, amount string) (*Quote, error) {
