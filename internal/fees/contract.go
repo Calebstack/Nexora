@@ -35,6 +35,7 @@ func NewFeeSplitterService(client stellar.SorobanClient, contractID, account str
 
 func (s *FeeSplitterService) Initialize(ctx context.Context, config ContractConfig) error {
 	binding := stellar.NewFeeSplitterContractBinding(s.client, s.contractID, s.account)
+	_ = binding
 
 	return fmt.Errorf("fee splitter initialization not yet implemented")
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/protocols/horizon"
 	"github.com/stellar/go/txnbuild"
 )
@@ -62,37 +61,23 @@ func (w *TTLWorker) renewExpiredTTLs(ctx context.Context) error {
 	}
 
 	totalCost := int64(0)
-	var txBuilder *txnbuild.TransactionBuilder
+	var ops []txnbuild.Operation
 
 	for _, entry := range entries {
 		if totalCost+w.estimateRenewalCost(entry.Size) > w.config.MaxSpendPerRun {
 			break
 		}
 
-		if txBuilder == nil {
-			txBuilder = txnbuild.NewTransactionBuilder(
-				&horizon.Account{
-					AccountID: "",
-					Sequence:  0,
-				},
-				"Test",
-				&txnbuild.TransactionBuilderOptions{},
-			)
-		}
-
-		op := &txnbuild.ExtendFootprintTTL{
+		op := &txnbuild.ExtendFootprintTtl{
 			ExtendTo: uint32(entry.TTL + w.config.ExtensionPeriodLedgers),
 		}
 
-		if err := txBuilder.AddOperation(op); err != nil {
-			return fmt.Errorf("add extend ttl operation: %w", err)
-		}
-
+		ops = append(ops, op)
 		totalCost += w.estimateRenewalCost(entry.Size)
 	}
 
-	if txBuilder != nil {
-		return w.submitRenewalTransaction(ctx, txBuilder)
+	if len(ops) > 0 {
+		return w.submitRenewalTransaction(ctx, ops)
 	}
 
 	return nil
@@ -104,8 +89,20 @@ func (w *TTLWorker) checkContractTTLs(ctx context.Context) ([]TTLEntry, error) {
 	return entries, nil
 }
 
-func (w *TTLWorker) submitRenewalTransaction(ctx context.Context, txBuilder *txnbuild.TransactionBuilder) error {
-	tx, err := txBuilder.Build()
+func (w *TTLWorker) submitRenewalTransaction(ctx context.Context, ops []txnbuild.Operation) error {
+	account := &horizon.Account{
+		AccountID: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+		Sequence:  0,
+	}
+	tx, err := txnbuild.NewTransaction(txnbuild.TransactionParams{
+		SourceAccount:        account,
+		IncrementSequenceNum: true,
+		Operations:           ops,
+		BaseFee:              txnbuild.MinBaseFee,
+		Preconditions: txnbuild.Preconditions{
+			TimeBounds: txnbuild.NewTimeout(300),
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("build transaction: %w", err)
 	}
