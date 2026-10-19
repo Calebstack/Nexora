@@ -42,6 +42,7 @@ type Service interface {
 	GetQuote(ctx context.Context, fromAsset, toAsset, amount string) (*domain.Quote, error)
 	ExecuteConversion(ctx context.Context, walletID, quoteID string, minAmountOut *decimal.Decimal, maxSlippageBps *int) (*domain.Conversion, error)
 	GetRates(ctx context.Context, from, to string) (*RateResponse, error)
+	BindQuoteToTransfer(ctx context.Context, quoteID, transferID, expectedTenantID string) (*domain.Quote, error)
 }
 
 type service struct {
@@ -261,6 +262,44 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 	}
 
 	return conv, nil
+}
+
+// BindQuoteToTransfer atomically claims a quote and binds it to a subsequent transfer (e.g. SEP-24 or SEP-31).
+func (s *service) BindQuoteToTransfer(ctx context.Context, quoteID, transferID, expectedTenantID string) (*domain.Quote, error) {
+	hasTenant := "0"
+	if expectedTenantID != "" {
+		hasTenant = "1"
+	}
+	result, err := markUsedScript.Run(ctx, s.redis,
+		[]string{quoteKeyPrefix + quoteID}, expectedTenantID, hasTenant).Result()
+	if err != nil {
+		msg := strings.TrimPrefix(err.Error(), "ERR ")
+		switch msg {
+		case "QUOTE_EXPIRED":
+			return nil, domain.ErrQuoteExpired
+		case "QUOTE_ALREADY_USED":
+			return nil, domain.ErrQuoteAlreadyUsed
+		case "QUOTE_OWNERSHIP_MISMATCH":
+			return nil, domain.ErrQuoteOwnershipMismatch
+		default:
+			return nil, fmt.Errorf("claim quote: %w", err)
+		}
+	}
+
+	var q domain.Quote
+	if err := json.Unmarshal([]byte(result.(string)), &q); err != nil {
+		return nil, fmt.Errorf("decode quote: %w", err)
+	}
+
+	if !q.ExpiresAt.IsZero() && q.ExpiresAt.Before(time.Now().UTC()) {
+		return nil, domain.ErrQuoteExpired
+	}
+
+	if s.auditRepo != nil {
+		_ = s.auditRepo.MarkQuoteUsed(ctx, q.ID, transferID)
+	}
+
+	return &q, nil
 }
 
 // GetRates returns a rate for the given pair, serving from the Redis cache and

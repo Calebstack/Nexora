@@ -215,6 +215,13 @@ func (m *mockFXService) GetRates(ctx context.Context, from, to string) (*fx.Rate
 	return nil, nil
 }
 
+func (m *mockFXService) BindQuoteToTransfer(ctx context.Context, quoteID, transferID, expectedTenantID string) (*domain.Quote, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, nil
+}
+
 // mockTransferService implements transfer.Service for testing. Guarded by a
 // mutex so concurrent-webhook tests can call InitiateTransfer from multiple
 // goroutines without racing on the transfers slice itself.
