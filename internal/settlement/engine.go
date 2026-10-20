@@ -35,6 +35,7 @@ type Engine struct {
 	network        string
 	assetIssuers   map[string]string
 	feeWallet      string
+	feePolicy      *FeePolicy
 }
 
 func NewEngine(
@@ -67,6 +68,39 @@ func (e *Engine) WithClientResolver(resolver stellar.ClientResolver) *Engine {
 func (e *Engine) WithSignerResolver(resolver stellar.SignerResolver) *Engine {
 	e.signerResolver = resolver
 	return e
+}
+
+// WithFeePolicy attaches a dynamic mempool congestion FeePolicy to the settlement engine.
+func (e *Engine) WithFeePolicy(policy *FeePolicy) *Engine {
+	e.feePolicy = policy
+	return e
+}
+
+func (e *Engine) resolveSettlementTier(ctx context.Context, tx *domain.Transaction) SettlementTier {
+	if v, ok := ctx.Value(settlementTierCtxKey{}).(SettlementTier); ok && v.Valid() {
+		return v
+	}
+	if tx != nil {
+		for _, tag := range tx.Tags {
+			switch SettlementTier(tag) {
+			case TierPriority, TierStandard, TierEconomy:
+				return SettlementTier(tag)
+			}
+		}
+	}
+	return TierStandard
+}
+
+func (e *Engine) computeBaseFee(ctx context.Context, tx *domain.Transaction, opCount int) int64 {
+	if e.feePolicy == nil {
+		return txnbuild.MinBaseFee * int64(opCount)
+	}
+	tier := e.resolveSettlementTier(ctx, tx)
+	quote, err := e.feePolicy.QuoteFee(ctx, tier, opCount)
+	if err != nil || quote == nil {
+		return txnbuild.MinBaseFee * int64(opCount)
+	}
+	return quote.PerOpFeeStroops
 }
 
 func (e *Engine) client(ctx context.Context) stellar.Client {
@@ -176,7 +210,7 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 		SourceAccount:        &srcAccount,
 		IncrementSequenceNum: true,
 		Operations:           ops,
-		BaseFee:              txnbuild.MinBaseFee * int64(len(ops)),
+		BaseFee:              e.computeBaseFee(ctx, tx, len(ops)),
 		Memo:                 memo,
 		Preconditions: txnbuild.Preconditions{
 			TimeBounds: txnbuild.NewTimeout(30),

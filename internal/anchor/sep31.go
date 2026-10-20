@@ -12,7 +12,7 @@ type SEP31Request struct {
 	Sender, Receiver           Party
 	Asset, Amount, Destination string
 }
-type Validator func(SEP31Request) error
+type SEP31Validator func(SEP31Request) error
 
 func Validate(req SEP31Request) error {
 	if req.Asset == "" || req.Amount == "" || req.Destination == "" {

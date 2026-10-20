@@ -16,6 +16,7 @@ import (
 type Worker struct {
 	engine *Engine
 	poller *FallbackPoller
+	locker SubmissionLocker
 }
 
 func NewWorker(engine *Engine) *Worker {
@@ -25,6 +26,13 @@ func NewWorker(engine *Engine) *Worker {
 // WithPoller attaches a FallbackPoller for telemetry and fallback coordination.
 func (w *Worker) WithPoller(poller *FallbackPoller) *Worker {
 	w.poller = poller
+	return w
+}
+
+// WithLocker attaches a distributed SubmissionLocker (e.g., RedlockManager) to prevent
+// concurrent duplicate submissions across horizontal worker scale-outs.
+func (w *Worker) WithLocker(locker SubmissionLocker) *Worker {
+	w.locker = locker
 	return w
 }
 
@@ -43,8 +51,21 @@ func (w *Worker) HandleProcessTransfer(ctx context.Context, task *asynq.Task) er
 
 	logger.Info().Str("tx_id", payload.TransactionID).Msg("processing transfer")
 
+	var transferLock *TransferLock
+	if w.locker != nil {
+		var lockErr error
+		transferLock, lockErr = w.locker.AcquireTransferLock(ctx, payload.TransactionID)
+		if lockErr != nil {
+			logger.Warn().Err(lockErr).Str("tx_id", payload.TransactionID).Msg("failed to acquire distributed submission lock, skipping duplicate concurrent worker")
+			return lockErr
+		}
+	}
+
 	tx, err := w.engine.txRepo.GetByID(ctx, payload.TransactionID)
 	if err != nil {
+		if transferLock != nil {
+			_ = transferLock.Release(ctx)
+		}
 		logger.Error().Err(err).Str("tx_id", payload.TransactionID).Msg("failed to fetch transaction for settlement check")
 		return err
 	}
@@ -56,6 +77,9 @@ func (w *Worker) HandleProcessTransfer(ctx context.Context, task *asynq.Task) er
 	if tx.Status == domain.StatusFailed || tx.Status == domain.StatusReconciliationFailed {
 		logger.Warn().Str("tx_id", payload.TransactionID).Str("status", string(tx.Status)).Msg("skipping already-failed transaction")
 		_ = w.engine.txRepo.UpdateStatus(ctx, payload.TransactionID, domain.StatusFailed, tx.TxHash)
+		if transferLock != nil {
+			_ = transferLock.Release(ctx)
+		}
 		return nil
 	}
 
@@ -66,8 +90,15 @@ func (w *Worker) HandleProcessTransfer(ctx context.Context, task *asynq.Task) er
 		}
 		if !strings.Contains(err.Error(), "awaiting reconciliation") {
 			_ = w.engine.txRepo.UpdateStatus(ctx, payload.TransactionID, domain.StatusFailed, "")
+			if transferLock != nil {
+				_ = transferLock.Release(ctx)
+			}
 		}
 		return err
+	}
+
+	if transferLock != nil {
+		_ = transferLock.Release(ctx)
 	}
 
 	if w.poller != nil {
