@@ -15,5 +15,8 @@ type BalanceHold struct {
 // CanHold reports whether placing a new hold of amount would exceed the
 // wallet's spendable balance given its already-held total.
 func CanHold(spendable, alreadyHeld, amount decimal.Decimal) bool {
+	if !amount.IsPositive() || alreadyHeld.IsNegative() || spendable.IsNegative() {
+		return false
+	}
 	return alreadyHeld.Add(amount).LessThanOrEqual(spendable)
 }
