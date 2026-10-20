@@ -12,6 +12,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/redis/go-redis/v9 v9.0.3
 	github.com/rs/zerolog v1.33.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/viper v1.19.0
 	github.com/stellar/go v0.0.0-20251210100531-aab2ea4aca88
@@ -85,7 +86,7 @@ require (
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/text v0.31.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/grpc v1.73.0 // indirect
