@@ -28,19 +28,32 @@ type volatilityState struct {
 	variances [3]float64 // EWMA variance per second, shortest window first.
 }
 
+// VolatilityAuditEntry records an adjustment to the spread multiplier for financial
+// reporting and regulatory audit transparency.
+type VolatilityAuditEntry struct {
+	Pair                 string             `json:"pair"`
+	Timestamp            time.Time          `json:"timestamp"`
+	AnnualizedVolatility float64            `json:"annualized_volatility"`
+	PreviousMultiplier   float64            `json:"previous_multiplier"`
+	NewMultiplier        float64            `json:"new_multiplier"`
+	Snapshot             VolatilitySnapshot `json:"snapshot"`
+}
+
 // VolatilityEngine estimates volatility from log returns. It keeps only a
 // constant amount of state per pair, so it is suitable for long-running quote
 // streams as well as on-demand pricing.
 type VolatilityEngine struct {
-	mu         sync.Mutex
-	states     map[string]volatilityState
+	mu          sync.Mutex
+	states      map[string]volatilityState
 	multipliers map[string]float64
+	auditLogs   map[string][]VolatilityAuditEntry
 }
 
 func NewVolatilityEngine() *VolatilityEngine {
 	return &VolatilityEngine{
 		states:      make(map[string]volatilityState),
 		multipliers: make(map[string]float64),
+		auditLogs:   make(map[string][]VolatilityAuditEntry),
 	}
 }
 
@@ -109,7 +122,21 @@ func (e *VolatilityEngine) SpreadMultiplier(pair string, volatility VolatilitySn
 	e.mu.Lock()
 	previous := e.multipliers[pair]
 	e.multipliers[pair] = multiplier
+
+	// Record audit entry for financial reporting whenever factor is established or adjusted.
+	if previous == 0 || math.Abs(previous-multiplier) > 0.01 {
+		entry := VolatilityAuditEntry{
+			Pair:                 pair,
+			Timestamp:            time.Now().UTC(),
+			AnnualizedVolatility: volatility.maximum(),
+			PreviousMultiplier:   previous,
+			NewMultiplier:        multiplier,
+			Snapshot:             volatility,
+		}
+		e.auditLogs[pair] = append(e.auditLogs[pair], entry)
+	}
 	e.mu.Unlock()
+
 	if previous != 0 && math.Abs(previous-multiplier) > 0.01 {
 		log.Info().Str("pair", pair).
 			Float64("previous_multiplier", previous).
@@ -118,4 +145,14 @@ func (e *VolatilityEngine) SpreadMultiplier(pair string, volatility VolatilitySn
 			Msg("fx rate-lock volatility factor adjusted")
 	}
 	return multiplier
+}
+
+// GetAuditLog retrieves the recorded multiplier adjustments for audit and financial reporting.
+func (e *VolatilityEngine) GetAuditLog(pair string) []VolatilityAuditEntry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	logs := e.auditLogs[pair]
+	result := make([]VolatilityAuditEntry, len(logs))
+	copy(result, logs)
+	return result
 }
