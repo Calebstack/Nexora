@@ -43,6 +43,7 @@ type Service interface {
 	ExecuteConversion(ctx context.Context, walletID, quoteID string, minAmountOut *decimal.Decimal, maxSlippageBps *int) (*domain.Conversion, error)
 	GetRates(ctx context.Context, from, to string) (*RateResponse, error)
 	BindQuoteToTransfer(ctx context.Context, quoteID, transferID, expectedTenantID string) (*domain.Quote, error)
+	WithMarginEngine(engine MarginEngine) Service
 }
 
 type service struct {
@@ -55,6 +56,7 @@ type service struct {
 	rateCache      *RateCache
 	volatility     *VolatilityEngine
 	triangulation  *TriangulationDetector
+	marginEngine   MarginEngine
 	usdcIssuer     string
 	providers      []Provider
 	spreadBps      int
@@ -121,6 +123,12 @@ func (s *service) SetTriangulationDetector(d *TriangulationDetector) {
 	s.triangulation = d
 }
 
+// WithMarginEngine wires the multi-tenant custom FX markup engine.
+func (s *service) WithMarginEngine(engine MarginEngine) Service {
+	s.marginEngine = engine
+	return s
+}
+
 // GetQuote prices a conversion, stores the quote in Redis with a 30-second TTL,
 // and writes an audit row to Postgres. Returns the quote with its ID token.
 func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount string) (*domain.Quote, error) {
@@ -166,8 +174,15 @@ func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount strin
 		return nil, err
 	}
 
-	toAmt := fromAmt.Mul(rateResp.Rate)
 	tenantID := tenant.IDFromContext(ctx)
+	finalRate := rateResp.Rate
+	if s.marginEngine != nil && tenantID != "" {
+		if customRate, _, err := s.marginEngine.CalculateCustomerQuote(ctx, tenantID, fromAsset, toAsset, fromAmt, rateResp.Rate); err == nil && !customRate.IsZero() {
+			finalRate = customRate
+		}
+	}
+
+	toAmt := fromAmt.Mul(finalRate)
 
 	feeAmt := decimal.Zero
 	if feeResult, feeErr := s.feeSvc.CalculateConversionFee(ctx, tenantID, fromAsset, fromAmt); feeErr == nil {
@@ -181,7 +196,7 @@ func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount strin
 		ToAsset:               toAsset,
 		FromAmount:            fromAmt,
 		ToAmount:              toAmt,
-		Rate:                  rateResp.Rate,
+		Rate:                  finalRate,
 		Fee:                   feeAmt,
 		ExpiresAt:             time.Now().UTC().Add(quoteTTL),
 		Used:                  false,
