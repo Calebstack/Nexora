@@ -79,6 +79,25 @@ var (
 	ErrDuplicateAlert             = errors.New("wallet balance alert already exists for this wallet and asset")
 )
 
+// FX quote sanity-check errors (issue #82). A quote that trips any of these is
+// never handed to a caller; the affected pair's automated quoting is suspended
+// until an operator resumes it, because a negative spread or an inverted rate
+// almost always signals a corrupt upstream feed rather than a real market move.
+var (
+	// ErrNegativeSpread rejects a quote whose ask price is not strictly greater
+	// than its bid price (a zero or negative bid-ask spread).
+	ErrNegativeSpread = errors.New("fx quote rejected: bid-ask spread is not strictly positive")
+	// ErrInvertedRate rejects a quote whose bid exceeds its ask, or whose bid or
+	// ask is non-positive — the hallmark of a transposed or corrupt feed.
+	ErrInvertedRate = errors.New("fx quote rejected: inverted or non-positive rate")
+	// ErrRateOutOfCorridor rejects a quote whose mid-market rate falls outside
+	// the plausible historical corridor configured for the pair.
+	ErrRateOutOfCorridor = errors.New("fx quote rejected: rate outside plausible historical corridor")
+	// ErrQuotingSuspended is returned while automated quoting for a pair is
+	// suspended after a prior sanity-check violation.
+	ErrQuotingSuspended = errors.New("fx quoting suspended for this pair pending operator review")
+)
+
 // Organization membership. Kept in its own block: appending to the var block
 // above would re-align every line in it, burying the change in noise.
 var (

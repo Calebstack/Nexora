@@ -55,6 +55,7 @@ type service struct {
 	rateCache      *RateCache
 	volatility     *VolatilityEngine
 	triangulation  *TriangulationDetector
+	sanity         *SanityChecker
 	usdcIssuer     string
 	providers      []Provider
 	spreadBps      int
@@ -121,6 +122,14 @@ func (s *service) SetTriangulationDetector(d *TriangulationDetector) {
 	s.triangulation = d
 }
 
+// SetSanityChecker wires the outgoing-quote sanity guard (issue #82). It is
+// opt-in: with no checker configured, GetQuote behaves exactly as before. The
+// checker assumes quoting is priced with a positive spread, so the derived
+// bid/ask carry a strictly positive spread for sound pairs.
+func (s *service) SetSanityChecker(c *SanityChecker) {
+	s.sanity = c
+}
+
 // GetQuote prices a conversion, stores the quote in Redis with a 30-second TTL,
 // and writes an audit row to Postgres. Returns the quote with its ID token.
 func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount string) (*domain.Quote, error) {
@@ -129,9 +138,25 @@ func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount strin
 		return nil, err
 	}
 
+	// Refuse to quote a pair whose automated quoting the sanity guard has
+	// suspended after a prior feed anomaly, before spending a provider call.
+	if s.sanity != nil && s.sanity.IsSuspended(fromAsset, toAsset) {
+		return nil, fmt.Errorf("%w: %s", domain.ErrQuotingSuspended, fromAsset+"-"+toAsset)
+	}
+
 	rateResp, err := s.GetRates(ctx, fromAsset, toAsset)
 	if err != nil {
 		return nil, err
+	}
+
+	// Inspect the outgoing quote for a negative/zero spread, an inverted or
+	// non-positive rate, or a mid outside the plausible historical corridor.
+	// The first violation suspends the pair and returns a typed error.
+	if s.sanity != nil {
+		snap := SnapshotFromMid(fromAsset, toAsset, rateResp.MidMarketRate, rateResp.SpreadBps, rateResp.Provider)
+		if err := s.sanity.Check(snap); err != nil {
+			return nil, err
+		}
 	}
 
 	if s.triangulation != nil {
