@@ -54,6 +54,7 @@ type service struct {
 	redis          redis.UniversalClient
 	rateCache      *RateCache
 	volatility     *VolatilityEngine
+	triangulation  *TriangulationDetector
 	usdcIssuer     string
 	providers      []Provider
 	spreadBps      int
@@ -115,6 +116,11 @@ func NewService(
 	return s
 }
 
+// SetTriangulationDetector wires the cross-pair triangulation pricing validator.
+func (s *service) SetTriangulationDetector(d *TriangulationDetector) {
+	s.triangulation = d
+}
+
 // GetQuote prices a conversion, stores the quote in Redis with a 30-second TTL,
 // and writes an audit row to Postgres. Returns the quote with its ID token.
 func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount string) (*domain.Quote, error) {
@@ -126,6 +132,27 @@ func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount strin
 	rateResp, err := s.GetRates(ctx, fromAsset, toAsset)
 	if err != nil {
 		return nil, err
+	}
+
+	if s.triangulation != nil {
+		directRate, _ := rateResp.Rate.Float64()
+		ratesMap := make(map[string]float64)
+		s.activePairsMu.RLock()
+		for pair := range s.activePairs {
+			parts := strings.Split(pair, ":")
+			if len(parts) == 2 {
+				if r, ok := s.rateCache.Get(ctx, parts[0], parts[1]); ok {
+					if flt, _ := r.Rate.Float64(); flt > 0 {
+						ratesMap[parts[0]+"-"+parts[1]] = flt
+					}
+				}
+			}
+		}
+		s.activePairsMu.RUnlock()
+
+		if res, err := s.triangulation.ValidateQuote(fromAsset, toAsset, directRate, ratesMap); err != nil && res.Halt {
+			return nil, err
+		}
 	}
 
 	fromAmt, err := decimal.NewFromString(amount)
@@ -221,8 +248,8 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 		return nil, domain.ErrQuoteOwnershipMismatch
 	}
 
-	// Expiry: reject if the quote has already expired server-side.
-	if !q.ExpiresAt.IsZero() && q.ExpiresAt.Before(time.Now().UTC()) {
+	// Expiry: reject if the quote has already expired server-side (even by 1 millisecond).
+	if !q.ExpiresAt.IsZero() && !time.Now().UTC().Before(q.ExpiresAt) {
 		return nil, domain.ErrQuoteExpired
 	}
 
@@ -232,7 +259,7 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 	}
 
 	if minAmountOut != nil && q.ToAmount.LessThan(*minAmountOut) {
-		return nil, fmt.Errorf("conversion failed: destination amount %s is less than minimum required %s", q.ToAmount.String(), minAmountOut.String())
+		return nil, fmt.Errorf("%w: destination amount %s is less than minimum required %s", domain.ErrSlippageExceeded, q.ToAmount.String(), minAmountOut.String())
 	}
 
 	if maxSlippageBps != nil {

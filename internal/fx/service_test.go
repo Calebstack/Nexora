@@ -945,3 +945,79 @@ func TestExecuteConversion_ConcurrentDoubleClaimOnlyOneWins(t *testing.T) {
 		t.Fatalf("expected %d already-used errors, got %d", attempts-1, alreadyUsed)
 	}
 }
+
+func TestTriangulationArbitrageDetector_DiscrepancyThresholdTrip(t *testing.T) {
+	var alertFired bool
+	detector := NewTriangulationDetector(0.012, func(a TriangulationAlert) {
+		alertFired = true
+	})
+
+	rates := map[string]float64{
+		"USD-EUR": 0.90,
+		"EUR-XLM": 5.00,
+	}
+	// Implied USD-XLM = 4.50. Quoting 4.65 is ~3.33% discrepancy > 1.2% threshold
+	result, err := detector.ValidateQuote("USD", "XLM", 4.65, rates)
+	if err == nil {
+		t.Fatal("expected ErrTriangulationDiscrepancy when discrepancy exceeds 1.2%")
+	}
+	if !errors.Is(err, ErrTriangulationDiscrepancy) {
+		t.Fatalf("expected ErrTriangulationDiscrepancy, got %v", err)
+	}
+	if !result.Halt {
+		t.Fatal("expected result.Halt to be true")
+	}
+	if !alertFired {
+		t.Fatal("expected alert to be fired on threshold violation")
+	}
+}
+
+func TestTriangulationArbitrageDetector_NormalMarketSpreadNoTrip(t *testing.T) {
+	detector := NewTriangulationDetector(0.012, nil)
+	rates := map[string]float64{
+		"USD-EUR": 0.92,
+		"EUR-XLM": 5.00,
+	}
+	// Implied USD-XLM = 4.60. Quoting 4.61 is ~0.217% discrepancy, normal spread
+	result, err := detector.ValidateQuote("USD", "XLM", 4.61, rates)
+	if err != nil {
+		t.Fatalf("unexpected error under normal market spread: %v", err)
+	}
+	if result.Halt {
+		t.Fatalf("circuit breaker false positive under normal spread: discrepancy = %f", result.Discrepancy)
+	}
+}
+
+func TestService_GetQuote_TriangulationHaltOnAnomaly(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	p := &xlmAwareProvider{rates: map[string]decimal.Decimal{
+		"USDC-XLM": decimal.RequireFromString("4.65"),
+	}}
+
+	svc := NewService(newMockWalletRepo(), newMockConvRepo(), &mockAuditRepo{}, &mockFeeSvc{}, &mockStellar{}, rdb, "usdc-issuer", []Provider{p}, 0)
+	detector := NewTriangulationDetector(0.012, nil)
+	svc.(*service).SetTriangulationDetector(detector)
+
+	// Pre-populate rate cache with intermediate pairs: USDC-EURC = 0.90, EURC-XLM = 5.00 -> Implied = 4.50
+	svc.(*service).rateCache.Set(context.Background(), "USDC", "EURC", &RateResponse{Rate: decimal.RequireFromString("0.90")})
+	svc.(*service).registerActivePair("USDC:EURC")
+	svc.(*service).rateCache.Set(context.Background(), "EURC", "XLM", &RateResponse{Rate: decimal.RequireFromString("5.00")})
+	svc.(*service).registerActivePair("EURC:XLM")
+
+	// Direct quote 4.65 vs implied 4.50 is 3.33% discrepancy -> must halt quote issuance
+	_, err = svc.GetQuote(context.Background(), "USDC", "XLM", "100")
+	if err == nil {
+		t.Fatal("expected GetQuote to fail when triangular discrepancy exceeds 1.2%")
+	}
+	if !errors.Is(err, ErrTriangulationDiscrepancy) {
+		t.Fatalf("expected ErrTriangulationDiscrepancy, got %v", err)
+	}
+}
+
+

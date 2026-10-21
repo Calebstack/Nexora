@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -154,3 +157,478 @@ func rateFromOraclePrices(from, to string, prices map[string]decimal.Decimal) (d
 		return decimal.Zero, fmt.Errorf("oracle cannot price %s-%s", from, to)
 	}
 }
+
+// Ticker represents a spot price ticker from an independent feed provider.
+type Ticker struct {
+	Source    string
+	Pair      string
+	Price     decimal.Decimal
+	Volume    decimal.Decimal
+	Timestamp time.Time
+}
+
+// SpotRateProvider fetches spot ticker data for currency pairs.
+type SpotRateProvider interface {
+	Name() string
+	FetchTicker(ctx context.Context, pair string) (Ticker, error)
+}
+
+// BinanceSpotProvider fetches spot rates from Binance public ticker API.
+type BinanceSpotProvider struct {
+	baseURL string
+	client  *http.Client
+}
+
+// NewBinanceSpotProvider creates a new Binance spot rate provider.
+func NewBinanceSpotProvider(baseURL string) *BinanceSpotProvider {
+	if baseURL == "" {
+		baseURL = "https://api.binance.com"
+	}
+	return &BinanceSpotProvider{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		client:  &http.Client{Timeout: oracleHTTPTimeout},
+	}
+}
+
+func (b *BinanceSpotProvider) Name() string {
+	return "binance"
+}
+
+func (b *BinanceSpotProvider) FetchTicker(ctx context.Context, pair string) (Ticker, error) {
+	symbol := binanceSymbol(pair)
+	if symbol == "" {
+		return Ticker{}, fmt.Errorf("binance: unsupported pair %s", pair)
+	}
+	url := fmt.Sprintf("%s/api/v3/ticker/24hr?symbol=%s", b.baseURL, symbol)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("binance request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("binance fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Ticker{}, fmt.Errorf("binance status %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		LastPrice string `json:"lastPrice"`
+		Volume    string `json:"volume"`
+		CloseTime int64  `json:"closeTime"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return Ticker{}, fmt.Errorf("binance decode: %w", err)
+	}
+
+	price, err := decimal.NewFromString(payload.LastPrice)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("binance parse price: %w", err)
+	}
+	volume, err := decimal.NewFromString(payload.Volume)
+	if err != nil {
+		volume = decimal.Zero
+	}
+
+	ts := time.Now().UTC()
+	if payload.CloseTime > 0 {
+		ts = time.UnixMilli(payload.CloseTime).UTC()
+	}
+
+	return Ticker{
+		Source:    b.Name(),
+		Pair:      pair,
+		Price:     price,
+		Volume:    volume,
+		Timestamp: ts,
+	}, nil
+}
+
+func binanceSymbol(pair string) string {
+	parts := strings.Split(pair, "-")
+	if len(parts) != 2 {
+		return ""
+	}
+	from, to := parts[0], parts[1]
+	if to == "USDC" || to == "USD" {
+		to = "USDT"
+	}
+	return from + to
+}
+
+// KrakenSpotProvider fetches spot rates from Kraken public ticker API.
+type KrakenSpotProvider struct {
+	baseURL string
+	client  *http.Client
+}
+
+// NewKrakenSpotProvider creates a new Kraken spot rate provider.
+func NewKrakenSpotProvider(baseURL string) *KrakenSpotProvider {
+	if baseURL == "" {
+		baseURL = "https://api.kraken.com"
+	}
+	return &KrakenSpotProvider{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		client:  &http.Client{Timeout: oracleHTTPTimeout},
+	}
+}
+
+func (k *KrakenSpotProvider) Name() string {
+	return "kraken"
+}
+
+func (k *KrakenSpotProvider) FetchTicker(ctx context.Context, pair string) (Ticker, error) {
+	krakenPair := krakenPairCode(pair)
+	if krakenPair == "" {
+		return Ticker{}, fmt.Errorf("kraken: unsupported pair %s", pair)
+	}
+	url := fmt.Sprintf("%s/0/public/Ticker?pair=%s", k.baseURL, krakenPair)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("kraken request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := k.client.Do(req)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("kraken fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Ticker{}, fmt.Errorf("kraken status %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Error  []string                          `json:"error"`
+		Result map[string]map[string]interface{} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return Ticker{}, fmt.Errorf("kraken decode: %w", err)
+	}
+	if len(payload.Error) > 0 {
+		return Ticker{}, fmt.Errorf("kraken error: %s", strings.Join(payload.Error, ", "))
+	}
+
+	for _, data := range payload.Result {
+		cArr, ok := data["c"].([]interface{})
+		if !ok || len(cArr) == 0 {
+			continue
+		}
+		priceStr, ok := cArr[0].(string)
+		if !ok {
+			continue
+		}
+		price, err := decimal.NewFromString(priceStr)
+		if err != nil {
+			continue
+		}
+		vol := decimal.Zero
+		if vArr, ok := data["v"].([]interface{}); ok && len(vArr) > 1 {
+			if vStr, ok := vArr[1].(string); ok {
+				vol, _ = decimal.NewFromString(vStr)
+			}
+		}
+
+		return Ticker{
+			Source:    k.Name(),
+			Pair:      pair,
+			Price:     price,
+			Volume:    vol,
+			Timestamp: time.Now().UTC(),
+		}, nil
+	}
+
+	return Ticker{}, fmt.Errorf("kraken: missing price for %s", pair)
+}
+
+func krakenPairCode(pair string) string {
+	parts := strings.Split(pair, "-")
+	if len(parts) != 2 {
+		return ""
+	}
+	from, to := parts[0], parts[1]
+	if from == "XLM" {
+		from = "XXLM"
+	}
+	if to == "USD" || to == "USDC" {
+		to = "ZUSD"
+	} else if to == "EUR" || to == "EURC" {
+		to = "ZEUR"
+	}
+	return from + to
+}
+
+// StellarDEXSpotProvider queries Stellar DEX orderbook depth and price.
+type StellarDEXSpotProvider struct {
+	horizonURL string
+	client     *http.Client
+}
+
+// NewStellarDEXSpotProvider creates a new Stellar DEX spot provider.
+func NewStellarDEXSpotProvider(horizonURL string) *StellarDEXSpotProvider {
+	if horizonURL == "" {
+		horizonURL = "https://horizon.stellar.org"
+	}
+	return &StellarDEXSpotProvider{
+		horizonURL: strings.TrimRight(horizonURL, "/"),
+		client:     &http.Client{Timeout: oracleHTTPTimeout},
+	}
+}
+
+func (s *StellarDEXSpotProvider) Name() string {
+	return "stellar_dex"
+}
+
+func (s *StellarDEXSpotProvider) FetchTicker(ctx context.Context, pair string) (Ticker, error) {
+	parts := strings.Split(pair, "-")
+	if len(parts) != 2 {
+		return Ticker{}, fmt.Errorf("stellar_dex: invalid pair format %s", pair)
+	}
+	url := fmt.Sprintf("%s/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=%s", s.horizonURL, parts[1])
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("stellar_dex request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("stellar_dex fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Ticker{}, fmt.Errorf("stellar_dex status %d", resp.StatusCode)
+	}
+
+	var book struct {
+		Asks []struct {
+			Amount string `json:"amount"`
+			Price  string `json:"price"`
+		} `json:"asks"`
+		Bids []struct {
+			Amount string `json:"amount"`
+			Price  string `json:"price"`
+		} `json:"bids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&book); err != nil {
+		return Ticker{}, fmt.Errorf("stellar_dex decode: %w", err)
+	}
+	if len(book.Asks) == 0 {
+		return Ticker{}, fmt.Errorf("stellar_dex: empty orderbook for %s", pair)
+	}
+
+	bestAsk, err := decimal.NewFromString(book.Asks[0].Price)
+	if err != nil {
+		return Ticker{}, fmt.Errorf("stellar_dex parse price: %w", err)
+	}
+	vol := decimal.Zero
+	for _, ask := range book.Asks {
+		if amt, err := decimal.NewFromString(ask.Amount); err == nil {
+			vol = vol.Add(amt)
+		}
+	}
+
+	return Ticker{
+		Source:    s.Name(),
+		Pair:      pair,
+		Price:     bestAsk,
+		Volume:    vol,
+		Timestamp: time.Now().UTC(),
+	}, nil
+}
+
+// OracleAggregator aggregates spot rates across multiple feeds with trimmed mean outlier filtering.
+type OracleAggregator struct {
+	providers       []SpotRateProvider
+	stalenessGuard  time.Duration
+	trimPercent     float64
+	minValidSources int
+	supportedPairs  []string
+}
+
+// NewOracleAggregator creates a new high-frequency FX rate aggregator.
+func NewOracleAggregator(providers []SpotRateProvider, supportedPairs []string) *OracleAggregator {
+	if len(supportedPairs) == 0 {
+		supportedPairs = DefaultXLMFXPairs()
+	}
+	return &OracleAggregator{
+		providers:       providers,
+		stalenessGuard:  15 * time.Second,
+		trimPercent:     0.10,
+		minValidSources: 1,
+		supportedPairs:  supportedPairs,
+	}
+}
+
+// SetStalenessGuard configures maximum acceptable age for price updates.
+func (a *OracleAggregator) SetStalenessGuard(d time.Duration) {
+	a.stalenessGuard = d
+}
+
+// SetTrimPercent sets the percentage of outliers to discard from both ends.
+func (a *OracleAggregator) SetTrimPercent(pct float64) {
+	a.trimPercent = pct
+}
+
+// SetMinValidSources configures the minimum required non-stale sources.
+func (a *OracleAggregator) SetMinValidSources(min int) {
+	a.minValidSources = min
+}
+
+func (a *OracleAggregator) SupportedPairs() []string {
+	return a.supportedPairs
+}
+
+// GetRate implements Provider interface.
+func (a *OracleAggregator) GetRate(ctx context.Context, from, to, _ string) (decimal.Decimal, error) {
+	from = normalizeAsset(from)
+	to = normalizeAsset(to)
+	pair := from + "-" + to
+	supported := false
+	for _, p := range a.supportedPairs {
+		if p == pair {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return decimal.Zero, fmt.Errorf("oracle unsupported pair %s", pair)
+	}
+	return a.Aggregate(ctx, pair)
+}
+
+// Aggregate ingests spot rates across all providers, filters outliers, and computes VWAP.
+func (a *OracleAggregator) Aggregate(ctx context.Context, pair string) (decimal.Decimal, error) {
+	return a.AggregateWithTime(ctx, pair, time.Now().UTC())
+}
+
+// AggregateWithTime allows time injection for deterministic testing of staleness.
+func (a *OracleAggregator) AggregateWithTime(ctx context.Context, pair string, now time.Time) (decimal.Decimal, error) {
+	if len(a.providers) < 3 {
+		return decimal.Zero, fmt.Errorf("oracle aggregator requires at least 3 spot rate providers, configured: %d", len(a.providers))
+	}
+
+	type result struct {
+		ticker Ticker
+		err    error
+	}
+
+	results := make(chan result, len(a.providers))
+	var wg sync.WaitGroup
+
+	for _, p := range a.providers {
+		wg.Add(1)
+		go func(prov SpotRateProvider) {
+			defer wg.Done()
+			t, err := prov.FetchTicker(ctx, pair)
+			results <- result{ticker: t, err: err}
+		}(p)
+	}
+
+	wg.Wait()
+	close(results)
+
+	var validTickers []Ticker
+	for r := range results {
+		if r.err != nil {
+			continue
+		}
+		// Staleness guard check: reject older than staleness window
+		age := now.Sub(r.ticker.Timestamp)
+		if age < 0 {
+			age = -age
+		}
+		if age > a.stalenessGuard {
+			continue
+		}
+		if r.ticker.Price.Sign() <= 0 {
+			continue
+		}
+		validTickers = append(validTickers, r.ticker)
+	}
+
+	if len(validTickers) < a.minValidSources {
+		return decimal.Zero, fmt.Errorf("insufficient valid non-stale rate feeds for %s: got %d, require at least %d", pair, len(validTickers), a.minValidSources)
+	}
+
+	// Filter outliers using Trimmed Mean
+	filtered := ApplyTrimmedMean(validTickers, a.trimPercent)
+	if len(filtered) == 0 {
+		return decimal.Zero, fmt.Errorf("all rate feeds eliminated by outlier filter for %s", pair)
+	}
+
+	return CalculateVWAP(filtered), nil
+}
+
+// ApplyTrimmedMean sorts tickers and eliminates top and bottom outliers.
+func ApplyTrimmedMean(tickers []Ticker, trimPercent float64) []Ticker {
+	n := len(tickers)
+	if n < 3 {
+		return tickers
+	}
+
+	sorted := make([]Ticker, n)
+	copy(sorted, tickers)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Price.LessThan(sorted[j].Price)
+	})
+
+	trimCount := int(math.Floor(float64(n) * trimPercent))
+
+	// For sample sizes where floor is 0 but outlier spikes exist, apply median filtering
+	if trimCount == 0 && n >= 3 {
+		medianPrice := sorted[n/2].Price
+		if medianPrice.Sign() > 0 {
+			var nonOutliers []Ticker
+			for _, t := range sorted {
+				diff := t.Price.Sub(medianPrice).Abs()
+				ratio := diff.Div(medianPrice)
+				// If deviation exceeds 50% from median, treat as manipulation/spike
+				if ratio.GreaterThan(decimal.RequireFromString("0.50")) {
+					continue
+				}
+				nonOutliers = append(nonOutliers, t)
+			}
+			if len(nonOutliers) >= 1 {
+				return nonOutliers
+			}
+		}
+		return sorted
+	}
+
+	if 2*trimCount >= n {
+		trimCount = (n - 1) / 2
+	}
+
+	return sorted[trimCount : n-trimCount]
+}
+
+// CalculateVWAP calculates the Volume-Weighted Average Price across tickers.
+// Falls back to simple arithmetic mean if total volume is zero.
+func CalculateVWAP(tickers []Ticker) decimal.Decimal {
+	if len(tickers) == 0 {
+		return decimal.Zero
+	}
+
+	totalWeighted := decimal.Zero
+	totalVolume := decimal.Zero
+
+	for _, t := range tickers {
+		if t.Volume.Sign() > 0 {
+			weighted := t.Price.Mul(t.Volume)
+			totalWeighted = totalWeighted.Add(weighted)
+			totalVolume = totalVolume.Add(t.Volume)
+		}
+	}
+
+	if totalVolume.Sign() > 0 {
+		return totalWeighted.Div(totalVolume)
+	}
+
+	// Fallback to simple mean
+	sum := decimal.Zero
+	for _, t := range tickers {
+		sum = sum.Add(t.Price)
+	}
+	return sum.Div(decimal.NewFromInt(int64(len(tickers))))
+}
+
