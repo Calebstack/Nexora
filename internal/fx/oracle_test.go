@@ -291,3 +291,182 @@ func TestOracleAggregator_ProviderInterface(t *testing.T) {
 	}
 }
 
+func TestOracleAggregator_SuddenPriceSpikeWithThreeFeeds(t *testing.T) {
+	now := time.Now().UTC()
+	// Two normal feeds around 0.21 - 0.22, one malicious flash-loan / manipulated spike at 5.00
+	p1 := &mockSpotProvider{
+		name: "binance",
+		ticker: Ticker{
+			Source:    "binance",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("0.21"),
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+	p2 := &mockSpotProvider{
+		name: "kraken",
+		ticker: Ticker{
+			Source:    "kraken",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("0.22"),
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+	p3 := &mockSpotProvider{
+		name: "dex_manipulated_spike",
+		ticker: Ticker{
+			Source:    "dex_manipulated_spike",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("5.00"), // Sudden 25x price spike
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+
+	agg := NewOracleAggregator([]SpotRateProvider{p1, p2, p3}, []string{"XLM-USDC"})
+	rate, err := agg.AggregateWithTime(context.Background(), "XLM-USDC", now)
+	if err != nil {
+		t.Fatalf("unexpected aggregate error: %v", err)
+	}
+
+	// Rate must be around 0.215, not contaminated by the 5.00 spike
+	if rate.GreaterThan(decimal.RequireFromString("0.30")) {
+		t.Fatalf("outlier filter failed to eliminate sudden spike: rate = %s", rate)
+	}
+	want := decimal.RequireFromString("0.215")
+	if !rate.Equal(want) {
+		t.Fatalf("expected rate = %s, got %s", want, rate)
+	}
+}
+
+func TestOracleAggregator_SuddenPriceDumpWithThreeFeeds(t *testing.T) {
+	now := time.Now().UTC()
+	// Two normal feeds around 0.21 - 0.22, one malicious flash-crash / outlier dump at 0.005
+	p1 := &mockSpotProvider{
+		name: "binance",
+		ticker: Ticker{
+			Source:    "binance",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("0.21"),
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+	p2 := &mockSpotProvider{
+		name: "kraken",
+		ticker: Ticker{
+			Source:    "kraken",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("0.22"),
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+	p3 := &mockSpotProvider{
+		name: "dex_flash_crash",
+		ticker: Ticker{
+			Source:    "dex_flash_crash",
+			Pair:      "XLM-USDC",
+			Price:     decimal.RequireFromString("0.005"), // Severe flash crash / dump
+			Volume:    decimal.RequireFromString("1000"),
+			Timestamp: now,
+		},
+	}
+
+	agg := NewOracleAggregator([]SpotRateProvider{p1, p2, p3}, []string{"XLM-USDC"})
+	rate, err := agg.AggregateWithTime(context.Background(), "XLM-USDC", now)
+	if err != nil {
+		t.Fatalf("unexpected aggregate error: %v", err)
+	}
+
+	// Rate must be around 0.215, not dragged down by the 0.005 dump
+	if rate.LessThan(decimal.RequireFromString("0.15")) {
+		t.Fatalf("outlier filter failed to eliminate sudden dump: rate = %s", rate)
+	}
+	want := decimal.RequireFromString("0.215")
+	if !rate.Equal(want) {
+		t.Fatalf("expected rate = %s, got %s", want, rate)
+	}
+}
+
+func TestOracleAggregator_ZeroVolumeArithmeticMeanFallback(t *testing.T) {
+	now := time.Now().UTC()
+	p1 := &mockSpotProvider{
+		name:   "p1",
+		ticker: Ticker{Price: decimal.RequireFromString("0.20"), Volume: decimal.Zero, Timestamp: now},
+	}
+	p2 := &mockSpotProvider{
+		name:   "p2",
+		ticker: Ticker{Price: decimal.RequireFromString("0.22"), Volume: decimal.Zero, Timestamp: now},
+	}
+	p3 := &mockSpotProvider{
+		name:   "p3",
+		ticker: Ticker{Price: decimal.RequireFromString("0.24"), Volume: decimal.Zero, Timestamp: now},
+	}
+
+	agg := NewOracleAggregator([]SpotRateProvider{p1, p2, p3}, []string{"XLM-USDC"})
+	rate, err := agg.AggregateWithTime(context.Background(), "XLM-USDC", now)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Simple arithmetic mean: (0.20 + 0.22 + 0.24) / 3 = 0.22
+	want := decimal.RequireFromString("0.22")
+	if !rate.Equal(want) {
+		t.Fatalf("rate = %s, want %s", rate, want)
+	}
+}
+
+func TestOracleAggregator_AllFeedsDisconnected(t *testing.T) {
+	p1 := &mockSpotProvider{name: "p1", err: fmt.Errorf("timeout")}
+	p2 := &mockSpotProvider{name: "p2", err: fmt.Errorf("network down")}
+	p3 := &mockSpotProvider{name: "p3", err: fmt.Errorf("bad gateway")}
+
+	agg := NewOracleAggregator([]SpotRateProvider{p1, p2, p3}, []string{"XLM-USDC"})
+	_, err := agg.Aggregate(context.Background(), "XLM-USDC")
+	if err == nil {
+		t.Fatal("expected error when all feeds are disconnected")
+	}
+}
+
+func TestStellarDEXSpotProvider_BidirectionalAndIssuer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("selling_asset_type") == "native" && query.Get("buying_asset_code") == "USDC" {
+			_, _ = w.Write([]byte(`{
+				"asks": [{"price": "0.25", "amount": "1000"}],
+				"bids": [{"price": "0.24", "amount": "1000"}]
+			}`))
+			return
+		}
+		if query.Get("buying_asset_type") == "native" && query.Get("selling_asset_code") == "USDC" {
+			_, _ = w.Write([]byte(`{
+				"asks": [{"price": "4.00", "amount": "500"}],
+				"bids": [{"price": "3.95", "amount": "500"}]
+			}`))
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	p := NewStellarDEXSpotProviderWithIssuer(srv.URL, "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5")
+	t1, err := p.FetchTicker(context.Background(), "XLM-USDC")
+	if err != nil {
+		t.Fatalf("FetchTicker XLM-USDC: %v", err)
+	}
+	if !t1.Price.Equal(decimal.RequireFromString("0.25")) {
+		t.Fatalf("price = %s, want 0.25", t1.Price)
+	}
+
+	t2, err := p.FetchTicker(context.Background(), "USDC-XLM")
+	if err != nil {
+		t.Fatalf("FetchTicker USDC-XLM: %v", err)
+	}
+	if !t2.Price.Equal(decimal.RequireFromString("4.00")) {
+		t.Fatalf("price = %s, want 4.00", t2.Price)
+	}
+}
+
