@@ -127,7 +127,7 @@ func (m *memoryLockRepository) Consume(lockID string, amount float64, now time.T
 	}
 
 	if lock.ConsumedAt != nil {
-		return domain.ErrQuoteExpired
+		return domain.ErrQuoteAlreadyUsed
 	}
 
 	// Slippage protection: validate min_amount_out
@@ -391,7 +391,7 @@ func (r *sqlLockRepository) ConsumeLock(ctx context.Context, lockID, conversionI
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE fx_rate_locks
 		SET consumed_at = $1, consumed_by = $2
-		WHERE id = $3 AND consumed_at IS NULL AND expires_at > $1
+		WHERE id = $3 AND consumed_at IS NULL AND expires_at > NOW()
 	`, now, conversionID, lockID)
 
 	if err != nil {
