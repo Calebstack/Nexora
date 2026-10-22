@@ -13,8 +13,6 @@ bin/
 dist/
 
 # Environment
-.env
-.env.local
 
 # Go
 *.test
@@ -23,7 +21,6 @@ vendor/
 # go.sum is explicitly committed for reproducible builds
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -51,3 +48,8 @@ coverage.html
 # Misc
 *.log
 .migrate/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+config.bat
+node_modules

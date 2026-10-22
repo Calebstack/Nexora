@@ -72,6 +72,31 @@ func NewClient(horizonURL, network string, timeout time.Duration) Client {
 	}
 }
 
+// NewRateLimitedClient builds a Horizon client whose HTTP requests pass through
+// a distributed leaky-bucket rate limiter before being sent (issue #45). The
+// limiter is shared across every API and worker instance via Redis, so the
+// global Horizon request rate stays under threshold and settlement broadcasts
+// are prioritised over best-effort reads. A nil limiter yields the same client
+// as NewClient.
+func NewRateLimitedClient(horizonURL, network string, timeout time.Duration, limiter *RateLimiter, classify PriorityClassifier) Client {
+	if timeout <= 0 {
+		timeout = defaultHorizonTimeout
+	}
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	var rt http.RoundTripper = base
+	if limiter != nil {
+		rt = NewRateLimitTransport(base, limiter, classify)
+	}
+	return &horizonClient{
+		inner: &horizonclient.Client{
+			HorizonURL: horizonURL,
+			HTTP:       &http.Client{Timeout: timeout, Transport: rt},
+		},
+		network: network,
+		timeout: timeout,
+	}
+}
+
 func (c *horizonClient) LoadAccount(accountID string) (horizon.Account, error) {
 	acct, err := c.inner.AccountDetail(horizonclient.AccountRequest{AccountID: accountID})
 	if err != nil {
