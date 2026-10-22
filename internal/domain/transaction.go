@@ -63,6 +63,9 @@ type Transaction struct {
 	IdempotencyKey      string
 	IdempotencyRecordID *string
 
+	// BroadcastOutcomeUnknown means a prior network submission cannot be ruled out.
+	BroadcastOutcomeUnknown bool `json:"-"`
+
 	// Fiat leg metadata, set only for transfers that settle a deposit or
 	// withdrawal through a fiat rail. All nullable — a pure on-chain
 	// transfer leaves every one of them nil.

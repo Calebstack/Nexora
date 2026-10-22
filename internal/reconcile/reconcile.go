@@ -25,7 +25,7 @@ import (
 const (
 	reconcileInterval     = 1 * time.Hour
 	pendingCheckThreshold = 2 * time.Minute
-	stuckThreshold        = 10 * time.Minute
+	stuckThreshold        = 2 * time.Minute
 	maxRequeues           = 3
 	pageSize              = 100
 )
@@ -754,6 +754,26 @@ func (s *Service) RecoverPending(ctx context.Context) error {
 			if tx.Status == domain.StatusComplianceHold {
 				log.Warn().Str("tx_id", tx.ID).
 					Msg("reconcile: skipping transaction held for compliance review")
+				continue
+			}
+
+			// A hash means the settlement worker persisted an envelope before
+			// broadcasting it. Horizon returning 404 is not proof that the
+			// network never accepted it, so never create a new transfer from
+			// this recovery path. Hash-bearing transactions are reconciled by
+			// RunPendingReconciliation instead.
+			if tx.TxHash != "" {
+				log.Warn().Str("tx_id", tx.ID).Str("tx_hash", tx.TxHash).
+					Msg("reconcile: refusing to requeue transaction with a recorded Stellar hash")
+				continue
+			}
+
+			// Rows submitted by versions predating broadcast tracking may have
+			// reached Horizon even though no hash was stored. Keep them for
+			// operator review rather than risking a second transfer.
+			if tx.BroadcastOutcomeUnknown {
+				log.Warn().Str("tx_id", tx.ID).
+					Msg("reconcile: refusing to requeue transaction with an uncertain broadcast outcome")
 				continue
 			}
 

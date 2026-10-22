@@ -233,7 +233,10 @@ func (r *TransactionRepo) getIdempotentTransaction(ctx context.Context, predicat
 // submitted.
 func (r *TransactionRepo) ClaimForSubmission(ctx context.Context, id string) error {
 	tag, err := r.db.Exec(ctx,
-		`UPDATE transactions SET status = 'submitted' WHERE id = $1 AND status = 'pending'`,
+		`UPDATE transactions
+		 SET status = 'submitted', submitted_at = NOW(), broadcast_outcome_unknown = FALSE
+		 WHERE id = $1 AND status = 'pending' AND tx_hash IS NULL
+		   AND broadcast_outcome_unknown = FALSE`,
 		id,
 	)
 	if err != nil {
@@ -266,7 +269,9 @@ func (r *TransactionRepo) RetryFailedTransaction(ctx context.Context, id string)
 	}
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions
-		 SET status = 'pending', tx_hash = NULL, failure_reason = '', failure_message = ''
+		 SET status = 'pending', tx_hash = NULL, submitted_at = NULL,
+		     broadcast_outcome_unknown = FALSE,
+		     failure_reason = '', failure_message = ''
 		 WHERE id = $1 AND tenant_id = $2 AND mode = $3 AND status = 'failed'`,
 		id, tenantID, mode,
 	)
@@ -284,11 +289,12 @@ func (r *TransactionRepo) RetryFailedTransaction(ctx context.Context, id string)
 func (r *TransactionRepo) ResetStuckSubmittedToPending(ctx context.Context, id string, olderThan time.Duration) error {
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions
-		 SET status = 'pending'
+		 SET status = 'pending', submitted_at = NULL, broadcast_outcome_unknown = FALSE
 		 WHERE id = $1
 		   AND status = 'submitted'
 		   AND tx_hash IS NULL
-		   AND created_at < NOW() - $2::interval`,
+		   AND broadcast_outcome_unknown = FALSE
+		   AND submitted_at < NOW() - $2::interval`,
 		id, olderThan.String(),
 	)
 	if err != nil {
@@ -303,7 +309,17 @@ func (r *TransactionRepo) ResetStuckSubmittedToPending(ctx context.Context, id s
 func (r *TransactionRepo) UpdateStatus(ctx context.Context, id string, status domain.TransactionStatus, txHash string) error {
 	tID := tenant.IDFromContext(ctx)
 	query := `UPDATE transactions
-		 SET status = $2, tx_hash = COALESCE(NULLIF($3, ''), tx_hash)
+		 SET status = $2,
+		     tx_hash = COALESCE(NULLIF($3, ''), tx_hash),
+		     submitted_at = CASE
+		       WHEN $2 = 'submitted' THEN COALESCE(submitted_at, NOW())
+		       ELSE NULL
+		     END,
+		     broadcast_outcome_unknown = CASE
+		       WHEN $2 = 'submitted' AND NULLIF($3, '') IS NOT NULL THEN TRUE
+		       WHEN $2 = 'submitted' THEN broadcast_outcome_unknown
+		       ELSE FALSE
+		     END
 		 WHERE id = $1 AND mode = $4
 		   AND status != 'confirmed'`
 	args := []interface{}{id, status, txHash, transactionMode(ctx)}
@@ -575,14 +591,15 @@ func (r *TransactionRepo) GetConfirmedTxesForReconciliation(ctx context.Context,
 	return txs, rows.Err()
 }
 
-// GetStuckPendingTxes returns transactions older than the specified duration
-// that never made it to the network.
+// GetStuckPendingTxes returns stale transactions that have no recorded Stellar
+// hash and therefore cannot have been broadcast by the settlement worker.
 func (r *TransactionRepo) GetStuckPendingTxes(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error) {
 	rows, err := r.db.Query(ctx,
 		`WITH claimed AS (
 			SELECT id FROM transactions
-			WHERE (status = 'pending' OR (status = 'submitted' AND tx_hash IS NULL))
-			  AND created_at < NOW() - $1::interval
+			WHERE tx_hash IS NULL
+			  AND ((status = 'pending' AND created_at < NOW() - $1::interval)
+			       OR (status = 'submitted' AND submitted_at < NOW() - $1::interval))
 			  AND (reconciled_at IS NULL OR reconciled_at < NOW() - $1::interval)
 			ORDER BY created_at ASC
 			LIMIT $2
@@ -593,7 +610,7 @@ func (r *TransactionRepo) GetStuckPendingTxes(ctx context.Context, olderThan tim
 		RETURNING id, COALESCE(tx_hash,''), type, status,
 		          COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
 		          asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, created_at,
-		          COALESCE(requeue_count, 0), reconciled_at`,
+		          COALESCE(requeue_count, 0), reconciled_at, broadcast_outcome_unknown`,
 		olderThan.String(), limit,
 	)
 	if err != nil {
@@ -610,7 +627,7 @@ func (r *TransactionRepo) GetStuckPendingTxes(ctx context.Context, olderThan tim
 		if err := rows.Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
 			&tx.FromWallet, &tx.ToWallet,
 			&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.CreatedAt,
-			&tx.RequeueCount, &tx.ReconciledAt); err != nil {
+			&tx.RequeueCount, &tx.ReconciledAt, &tx.BroadcastOutcomeUnknown); err != nil {
 			return nil, err
 		}
 		tx.Amount, _ = decimal.NewFromString(amount)
@@ -786,16 +803,17 @@ func (r *TransactionRepo) UpsertByTxHash(ctx context.Context, tx *domain.Transac
 	return nil
 }
 
-// GetPendingTxesForReconciliation returns pending or submitted transactions
-// that have a Stellar tx_hash stored and are older than olderThan.
+// GetPendingTxesForReconciliation returns stale pending or submitted
+// transactions with a Stellar hash for lookup on Horizon.
 func (r *TransactionRepo) GetPendingTxesForReconciliation(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error) {
 	rows, err := r.db.Query(ctx,
 		`WITH claimed AS (
 			SELECT id FROM transactions
 			WHERE status IN ('pending', 'submitted')
 			  AND tx_hash IS NOT NULL
-			  AND ((reconciled_at IS NULL AND created_at < NOW() - $1::interval) OR
-			       (reconciled_at IS NOT NULL AND reconciled_at < NOW() - $1::interval))
+			  AND ((status = 'pending' AND created_at < NOW() - $1::interval)
+			       OR (status = 'submitted' AND submitted_at < NOW() - $1::interval))
+			  AND (reconciled_at IS NULL OR reconciled_at < NOW() - $1::interval)
 			ORDER BY created_at ASC
 			LIMIT $2
 			FOR UPDATE SKIP LOCKED
@@ -842,7 +860,9 @@ func (r *TransactionRepo) GetPendingTxesForReconciliation(ctx context.Context, o
 // UpdateTxConfirmed transitions a pending or submitted transaction to confirmed.
 func (r *TransactionRepo) UpdateTxConfirmed(ctx context.Context, id, txHash string) error {
 	tag, err := r.db.Exec(ctx,
-		`UPDATE transactions SET status = 'confirmed', tx_hash = NULLIF($2, '') WHERE id = $1 AND status IN ('pending', 'submitted')`,
+		`UPDATE transactions
+		 SET status = 'confirmed', tx_hash = NULLIF($2, ''), submitted_at = NULL
+		 WHERE id = $1 AND status IN ('pending', 'submitted')`,
 		id, txHash,
 	)
 	if err != nil {
@@ -857,7 +877,9 @@ func (r *TransactionRepo) UpdateTxConfirmed(ctx context.Context, id, txHash stri
 // UpdateTxFailed transitions a pending or submitted transaction to failed.
 func (r *TransactionRepo) UpdateTxFailed(ctx context.Context, id string) error {
 	tag, err := r.db.Exec(ctx,
-		`UPDATE transactions SET status = 'failed' WHERE id = $1 AND status IN ('pending', 'submitted')`,
+		`UPDATE transactions
+		 SET status = 'failed', submitted_at = NULL
+		 WHERE id = $1 AND status IN ('pending', 'submitted')`,
 		id,
 	)
 	if err != nil {
