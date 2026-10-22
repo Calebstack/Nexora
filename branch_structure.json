@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/113-inflight-settlement-recovery",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/113-inflight-settlement-recovery": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/113-inflight-settlement-recovery",
+    "origin"
+  ]
+}
