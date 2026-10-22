@@ -32,17 +32,19 @@ type RateLockEvent struct {
 
 // RateLock holds a quoted rate for a bounded window, guaranteed against slippage.
 type RateLock struct {
-	ID           string          `json:"id"`
-	TenantID     string          `json:"tenant_id,omitempty"`
-	FromAsset    string          `json:"from_asset,omitempty"`
-	ToAsset      string          `json:"to_asset,omitempty"`
-	LockedRate   decimal.Decimal `json:"locked_rate,omitempty"`
-	Amount       decimal.Decimal `json:"amount,omitempty"`
-	MinAmountOut float64         `json:"min_amount_out,omitempty"`
-	ExpiresAt    time.Time       `json:"expires_at"`
-	ConsumedAt   *time.Time      `json:"consumed_at,omitempty"`
-	ConsumedBy   *string         `json:"consumed_by,omitempty"`
-	CreatedAt    time.Time       `json:"created_at"`
+	ID           string                `json:"id"`
+	TenantID     string                `json:"tenant_id,omitempty"`
+	FromAsset    string                `json:"from_asset,omitempty"`
+	ToAsset      string                `json:"to_asset,omitempty"`
+	LockedRate   decimal.Decimal       `json:"locked_rate,omitempty"`
+	Amount       decimal.Decimal       `json:"amount,omitempty"`
+	MinAmountOut float64               `json:"min_amount_out,omitempty"`
+	ExpiresAt    time.Time             `json:"expires_at"`
+	ConsumedAt   *time.Time            `json:"consumed_at,omitempty"`
+	ConsumedBy   *string               `json:"consumed_by,omitempty"`
+	Status       domain.RateLockStatus `json:"status,omitempty"`
+	WalletID     *string               `json:"wallet_id,omitempty"`
+	CreatedAt    time.Time             `json:"created_at"`
 }
 
 // LockRepository handles persistence and atomic state transitions of FX rate locks.
@@ -316,14 +318,17 @@ func (r *sqlLockRepository) Create(ctx context.Context, lock *domain.RateLock) e
 	if lock.ID == "" {
 		lock.ID = uuid.New().String()
 	}
+	if lock.Status == "" {
+		lock.Status = domain.RateLockStatusActive
+	}
 	lock.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
 
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO fx_rate_locks 
-		(id, tenant_id, from_asset, to_asset, locked_rate, amount, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		(id, tenant_id, from_asset, to_asset, locked_rate, amount, expires_at, status, wallet_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, lock.ID, lock.TenantID, lock.FromAsset, lock.ToAsset, lock.LockedRate,
-		lock.Amount, lock.ExpiresAt, lock.CreatedAt)
+		lock.Amount, lock.ExpiresAt, string(lock.Status), lock.WalletID, lock.CreatedAt)
 
 	if err == nil {
 		r.RecordEvent(RateLockEvent{
@@ -339,18 +344,22 @@ func (r *sqlLockRepository) Create(ctx context.Context, lock *domain.RateLock) e
 
 func (r *sqlLockRepository) Get(ctx context.Context, id, tenantID string) (*domain.RateLock, error) {
 	lock := &domain.RateLock{}
+	var statusStr string
 	err := r.db.QueryRowContext(ctx, `
 		SELECT id, tenant_id, from_asset, to_asset, locked_rate, amount,
-		       expires_at, consumed_at, consumed_by, created_at
+		       expires_at, consumed_at, consumed_by, COALESCE(status, 'active'), wallet_id, created_at
 		FROM fx_rate_locks
 		WHERE id = $1 AND tenant_id = $2
 	`, id, tenantID).Scan(
 		&lock.ID, &lock.TenantID, &lock.FromAsset, &lock.ToAsset, &lock.LockedRate,
-		&lock.Amount, &lock.ExpiresAt, &lock.ConsumedAt, &lock.ConsumedBy, &lock.CreatedAt,
+		&lock.Amount, &lock.ExpiresAt, &lock.ConsumedAt, &lock.ConsumedBy, &statusStr, &lock.WalletID, &lock.CreatedAt,
 	)
 
 	if err == sql.ErrNoRows {
 		return nil, domain.ErrWalletNotFound
+	}
+	if err == nil {
+		lock.Status = domain.RateLockStatus(statusStr)
 	}
 	return lock, err
 }

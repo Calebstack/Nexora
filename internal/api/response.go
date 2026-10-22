@@ -116,7 +116,8 @@ func HandleDomainError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrIncidentNotFound),
 		errors.Is(err, domain.ErrBatchNotFound), errors.Is(err, domain.ErrScheduleNotFound),
 		errors.Is(err, domain.ErrUserNotFound), errors.Is(err, domain.ErrOrgNotFound), errors.Is(err, domain.ErrOrgMemberNotFound),
-		errors.Is(err, domain.ErrInviteNotFound), errors.Is(err, domain.ErrClaimableBalanceNotFound):
+		errors.Is(err, domain.ErrInviteNotFound), errors.Is(err, domain.ErrClaimableBalanceNotFound),
+		errors.Is(err, domain.ErrMarginNotFound):
 		NotFound(w, err.Error())
 	case errors.Is(err, domain.ErrSelfTransfer), errors.Is(err, domain.ErrInvalidAsset),
 		errors.Is(err, domain.ErrBeneficiaryNotAllowed),
@@ -127,7 +128,8 @@ func HandleDomainError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrInvalidQuoteAmount), errors.Is(err, domain.ErrInvalidAmount),
 		errors.Is(err, domain.ErrNoClaimants), errors.Is(err, domain.ErrClaimantNotFound),
 		errors.Is(err, domain.ErrClaimantNotCustodied), errors.Is(err, domain.ErrSourceWalletRequired),
-		errors.Is(err, domain.ErrSponsorNotCustodied):
+		errors.Is(err, domain.ErrSponsorNotCustodied), errors.Is(err, domain.ErrCorridorConflict),
+		errors.Is(err, domain.ErrMarginCeilingExceeded):
 		BadRequest(w, err.Error())
 	// An unsupported fiat currency is a 400 with its own code so a caller can
 	// tell "this rail does not serve that currency" from a malformed request.
@@ -144,7 +146,7 @@ func HandleDomainError(w http.ResponseWriter, err error) {
 	// a malformed request: the request was fine, the resource moved on.
 	case errors.Is(err, domain.ErrClaimableBalanceNotPending):
 		Error(w, http.StatusConflict, "CLAIMABLE_BALANCE_NOT_PENDING", err.Error())
-	case errors.Is(err, domain.ErrUserAlreadyExists):
+	case errors.Is(err, domain.ErrUserAlreadyExists), errors.Is(err, domain.ErrDuplicateMarginTier):
 		Error(w, http.StatusConflict, "CONFLICT", err.Error())
 	case errors.Is(err, domain.ErrLastOrgOwner):
 		Error(w, http.StatusConflict, "LAST_ORG_OWNER", err.Error())
