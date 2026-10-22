@@ -109,8 +109,9 @@ func TestBuildAsset_EmptyIssuer(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type fakeTxRepo struct {
-	mu   sync.Mutex
-	rows map[string]*domain.Transaction
+	mu              sync.Mutex
+	rows            map[string]*domain.Transaction
+	updateStatusErr error
 }
 
 func newFakeTxRepo(tx *domain.Transaction) *fakeTxRepo {
@@ -134,10 +135,9 @@ func (f *fakeTxRepo) GetByID(_ context.Context, id string) (*domain.Transaction,
 	return &cp, nil
 }
 
-// ClaimForSubmission mirrors the Postgres CAS: strictly pending -> submitted.
-// A row already submitted (with or without a hash yet) is never silently
-// reclaimed here — that would reopen exactly the race this method exists to
-// close (see TestSubmitTransfer_ConcurrentWorkers_OnlyOneSubmits).
+// ClaimForSubmission mirrors the Postgres CAS: only a hashless pending row can
+// transition to submitted. A row already submitted or carrying a prior hash
+// is never silently reclaimed.
 func (f *fakeTxRepo) ClaimForSubmission(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -145,16 +145,20 @@ func (f *fakeTxRepo) ClaimForSubmission(_ context.Context, id string) error {
 	if !ok {
 		return domain.ErrTransactionNotFound
 	}
-	if tx.Status != domain.StatusPending {
+	if tx.Status != domain.StatusPending || tx.TxHash != "" || tx.BroadcastOutcomeUnknown {
 		return domain.ErrConcurrentUpdate
 	}
 	tx.Status = domain.StatusSubmitted
+	tx.BroadcastOutcomeUnknown = false
 	return nil
 }
 
 func (f *fakeTxRepo) UpdateStatus(_ context.Context, id string, status domain.TransactionStatus, txHash string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if status == domain.StatusSubmitted && f.updateStatusErr != nil {
+		return f.updateStatusErr
+	}
 	tx, ok := f.rows[id]
 	if !ok {
 		return domain.ErrTransactionNotFound
@@ -162,6 +166,9 @@ func (f *fakeTxRepo) UpdateStatus(_ context.Context, id string, status domain.Tr
 	tx.Status = status
 	if txHash != "" {
 		tx.TxHash = txHash
+		tx.BroadcastOutcomeUnknown = true
+	} else if status != domain.StatusSubmitted {
+		tx.BroadcastOutcomeUnknown = false
 	}
 	return nil
 }
@@ -357,6 +364,7 @@ func TestSubmitTransfer_Success_MarksConfirmed(t *testing.T) {
 	if err := e.SubmitTransfer(context.Background(), "tx-1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+
 	if got := txRepo.status("tx-1"); got != domain.StatusConfirmed {
 		t.Errorf("expected confirmed, got %s", got)
 	}
@@ -370,6 +378,35 @@ func TestSubmitTransfer_Success_MarksConfirmed(t *testing.T) {
 		t.Error("expected UpsertBalance to be called")
 	}
 	// Fee is zero, so RecordCollection might be skipped. Let's create a tx with a fee for testing it.
+}
+
+func TestSubmitTransfer_DoesNotBroadcastWhenHashPersistenceFails(t *testing.T) {
+	src, dst := testWallets(t)
+	tx := &domain.Transaction{
+		ID: "tx-hash-write-failed", Status: domain.StatusPending,
+		FromWallet: src.ID, ToWallet: dst.ID, Asset: "XLM",
+		Amount: decimal.NewFromInt(10), Fee: decimal.Zero,
+	}
+	txRepo := newFakeTxRepo(tx)
+	txRepo.updateStatusErr = errors.New("database unavailable")
+	stl := &fakeStellarClient{submitFunc: alwaysSucceeds()}
+	engine := newTestEngine(txRepo,
+		&fakeWalletRepo{wallets: map[string]*domain.Wallet{src.ID: src, dst.ID: dst}},
+		nil, stl)
+
+	err := engine.SubmitTransfer(context.Background(), tx.ID)
+	if err == nil || !strings.Contains(err.Error(), "awaiting reconciliation") {
+		t.Fatalf("expected recoverable hash persistence error, got %v", err)
+	}
+	if stl.calls() != 0 {
+		t.Fatalf("transaction was broadcast %d times after hash persistence failed", stl.calls())
+	}
+	if got := txRepo.status(tx.ID); got != domain.StatusSubmitted {
+		t.Fatalf("expected claimed transaction to remain submitted, got %s", got)
+	}
+	if got := txRepo.txHash(tx.ID); got != "" {
+		t.Fatalf("expected no hash to be persisted, got %q", got)
+	}
 }
 
 func TestSubmitTransfer_Success_CollectsFees(t *testing.T) {
@@ -439,11 +476,36 @@ func TestSubmitTransfer_AlreadyClaimed_Skips(t *testing.T) {
 	if err := e.SubmitTransfer(context.Background(), "tx-1"); err != nil {
 		t.Fatalf("expected a graceful skip (nil), got error: %v", err)
 	}
+
 	if stl.calls() != 0 {
 		t.Errorf("expected no Stellar submission for an already-claimed transaction, got %d", stl.calls())
 	}
 	if got := txRepo.status("tx-1"); got != domain.StatusSubmitted {
 		t.Errorf("status must be left untouched, got %s", got)
+	}
+}
+
+func TestSubmitTransfer_PendingTransactionWithHashIsNotResubmitted(t *testing.T) {
+	src, dst := testWallets(t)
+	tx := &domain.Transaction{
+		ID: "tx-pending-with-hash", Status: domain.StatusPending, TxHash: "existing-hash",
+		FromWallet: src.ID, ToWallet: dst.ID, Asset: "XLM",
+		Amount: decimal.NewFromInt(10), Fee: decimal.Zero,
+	}
+	txRepo := newFakeTxRepo(tx)
+	stl := &fakeStellarClient{submitFunc: alwaysSucceeds()}
+	engine := newTestEngine(txRepo,
+		&fakeWalletRepo{wallets: map[string]*domain.Wallet{src.ID: src, dst.ID: dst}},
+		nil, stl)
+
+	if err := engine.SubmitTransfer(context.Background(), tx.ID); err != nil {
+		t.Fatalf("expected a graceful skip for a hashed transaction, got %v", err)
+	}
+	if stl.calls() != 0 {
+		t.Fatalf("hashed transaction was submitted %d times", stl.calls())
+	}
+	if got := txRepo.status(tx.ID); got != domain.StatusPending {
+		t.Fatalf("expected status to remain pending for Horizon reconciliation, got %s", got)
 	}
 }
 

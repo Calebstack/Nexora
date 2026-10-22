@@ -17,6 +17,7 @@ type holdSkipRepo struct {
 	stuck    []*domain.Transaction
 	requeued []string
 	failed   []string
+	reset    []string
 }
 
 func (m *holdSkipRepo) GetStuckPendingTxes(_ context.Context, _ time.Duration, _ int) ([]*domain.Transaction, error) {
@@ -32,6 +33,11 @@ func (m *holdSkipRepo) IncrementRequeueCount(_ context.Context, id string) (int,
 
 func (m *holdSkipRepo) UpdateReconciliationStatus(_ context.Context, id string, _ domain.TransactionStatus) error {
 	m.failed = append(m.failed, id)
+	return nil
+}
+
+func (m *holdSkipRepo) ResetStuckSubmittedToPending(_ context.Context, id string, _ time.Duration) error {
+	m.reset = append(m.reset, id)
 	return nil
 }
 
@@ -79,5 +85,54 @@ func TestRecoverPendingStillProcessesPendingTransactions(t *testing.T) {
 		if id == "tx-held" {
 			t.Fatal("the held transfer was marked failed")
 		}
+	}
+}
+
+func TestRecoverPendingDoesNotRequeueTransactionsWithHashes(t *testing.T) {
+	repo := &holdSkipRepo{stuck: []*domain.Transaction{
+		{ID: "tx-pending-hash", Status: domain.StatusPending, TxHash: "hash-pending", CreatedAt: time.Now().Add(-time.Hour)},
+		{ID: "tx-submitted-hash", Status: domain.StatusSubmitted, TxHash: "hash-submitted", CreatedAt: time.Now().Add(-time.Hour)},
+	}}
+
+	if err := newRecoveryService(repo).RecoverPending(context.Background()); err != nil {
+		t.Fatalf("RecoverPending: %v", err)
+	}
+
+	if len(repo.requeued) != 0 {
+		t.Fatalf("transactions with recorded hashes were requeued: %v", repo.requeued)
+	}
+	if len(repo.failed) != 0 {
+		t.Fatalf("transactions with recorded hashes were marked failed: %v", repo.failed)
+	}
+}
+
+func TestRecoverPendingResetsStaleSubmittedWithoutHash(t *testing.T) {
+	repo := &holdSkipRepo{stuck: []*domain.Transaction{
+		{ID: "tx-stale-submitted", Status: domain.StatusSubmitted, CreatedAt: time.Now().Add(-time.Hour)},
+	}}
+
+	if err := newRecoveryService(repo).RecoverPending(context.Background()); err != nil {
+		t.Fatalf("RecoverPending: %v", err)
+	}
+
+	if len(repo.reset) != 1 || repo.reset[0] != "tx-stale-submitted" {
+		t.Fatalf("reset transactions %v, want [tx-stale-submitted]", repo.reset)
+	}
+}
+
+func TestRecoverPendingLeavesLegacySubmittedWithoutHashForReview(t *testing.T) {
+	repo := &holdSkipRepo{stuck: []*domain.Transaction{
+		{
+			ID: "tx-legacy-uncertain", Status: domain.StatusSubmitted,
+			CreatedAt: time.Now().Add(-time.Hour), BroadcastOutcomeUnknown: true,
+		},
+	}}
+
+	if err := newRecoveryService(repo).RecoverPending(context.Background()); err != nil {
+		t.Fatalf("RecoverPending: %v", err)
+	}
+
+	if len(repo.reset) != 0 || len(repo.requeued) != 0 {
+		t.Fatalf("uncertain legacy transaction was reset or requeued: reset=%v requeued=%v", repo.reset, repo.requeued)
 	}
 }

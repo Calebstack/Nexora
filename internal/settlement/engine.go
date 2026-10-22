@@ -243,6 +243,7 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 	if err := e.txRepo.UpdateStatus(ctx, txID, domain.StatusSubmitted, txHash); err != nil {
 		log.Error().Err(err).Str("tx_id", txID).Str("tx_hash", txHash).
 			Msg("settlement: failed to record tx hash before submission")
+		return fmt.Errorf("record transaction hash before submission, awaiting reconciliation: %w", err)
 	}
 
 	outcome := e.submitWithRetry(ctx, stellarTx)

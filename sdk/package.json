@@ -17,10 +17,10 @@
     "README.md"
   ],
   "scripts": {
-    "build:cjs": "tsc -p tsconfig.cjs.json",
-    "build:esm": "tsc -p tsconfig.esm.json",
-    "build:types": "tsc -p tsconfig.types.json",
-    "build": "npm run build:cjs && npm run build:esm && npm run build:types",
+    "build:cjs": "node init && tsc -p tsconfig.cjs.json",
+    "build:esm": "node init && tsc -p tsconfig.esm.json",
+    "build:types": "node init && tsc -p tsconfig.types.json",
+    "build": "node init && npm run build:cjs && npm run build:esm && npm run build:types",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.ts\" \"*.json\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"*.json\"",
