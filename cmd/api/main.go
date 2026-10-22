@@ -374,7 +374,12 @@ func main() {
 	transferHandler := transfer.NewHandler(transferSvc).WithIdempotency(transferIdemMW)
 	transferApprovalSvc := transferapproval.NewService(postgres.NewTransferApprovalRepo(repoDB), queueClient)
 	transferApprovalHandler := transferapproval.NewHandler(transferApprovalSvc)
-	fxHandler := fx.NewHandler(fxSvc).WithIdempotency(idemMW)
+
+	tenantFXRepo := postgres.NewTenantFXRepo(repoDB)
+	marginEngine := fx.NewMarginEngine(tenantFXRepo)
+	fxSvc.WithMarginEngine(marginEngine)
+	marginHandler := fx.NewMarginHandler(marginEngine).WithAuditLogger(auditSvc)
+	fxHandler := fx.NewHandler(fxSvc).WithIdempotency(idemMW).WithMarginHandler(marginHandler)
 	fiatHandler := fiat.NewHandler(fiatSvc).WithIdempotency(idemMW)
 	paymentLinkHandler := paymentlink.NewHandler(paymentlink.NewService(postgres.NewPaymentLinkRepo(repoDB), fiatSvc)).WithIdempotency(idemMW).WithAuditLogger(auditSvc)
 	refundHandler := refund.NewHandler(refundSvc).WithIdempotency(idemMW).WithAuditLogger(auditSvc)

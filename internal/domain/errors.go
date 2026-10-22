@@ -77,6 +77,10 @@ var (
 	ErrBeneficiaryAccountNotFound = errors.New("destination Stellar account does not exist")
 	ErrWalletBalanceAlertNotFound = errors.New("wallet balance alert not found")
 	ErrDuplicateAlert             = errors.New("wallet balance alert already exists for this wallet and asset")
+	ErrMarginNotFound             = errors.New("tenant FX margin not found")
+	ErrMarginCeilingExceeded      = errors.New("FX margin markup exceeds allowable ceilings")
+	ErrCorridorConflict           = errors.New("corridor from_asset and to_asset cannot be identical")
+	ErrDuplicateMarginTier        = errors.New("margin configuration already exists for this tenant, corridor, and tier")
 )
 
 // FX quote sanity-check errors (issue #82). A quote that trips any of these is

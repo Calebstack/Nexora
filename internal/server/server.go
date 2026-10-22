@@ -285,6 +285,7 @@ func New(
 				r.Use(RequireRole(domain.RoleOwner, domain.RoleAdmin))
 				r.Route("/admin/fees", feeHandler.AdminRoutes())
 				r.Route("/admin/anchors", anchorHandler.AdminRoutes())
+				r.Route("/admin/fx/margins", fxHandler.MarginAdminRoutes())
 				r.Route("/admin", reconcileHandler.AdminRoutes())
 				r.With(RequirePlatformOperator()).Route("/admin/treasury", treasuryHandler.AdminRoutes())
 				if statusHandler != nil {

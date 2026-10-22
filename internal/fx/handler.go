@@ -10,9 +10,10 @@ import (
 )
 
 type Handler struct {
-	svc    Service
-	stream *QuoteStream
-	idem   func(http.Handler) http.Handler
+	svc           Service
+	stream        *QuoteStream
+	idem          func(http.Handler) http.Handler
+	marginHandler *MarginHandler
 }
 
 func NewHandler(svc Service) *Handler {
@@ -24,6 +25,20 @@ func NewHandler(svc Service) *Handler {
 func (h *Handler) WithIdempotency(mw func(http.Handler) http.Handler) *Handler {
 	h.idem = mw
 	return h
+}
+
+// WithMarginHandler attaches the administrative margin handler.
+func (h *Handler) WithMarginHandler(mh *MarginHandler) *Handler {
+	h.marginHandler = mh
+	return h
+}
+
+// MarginAdminRoutes returns administrative margin routes.
+func (h *Handler) MarginAdminRoutes() func(r chi.Router) {
+	if h.marginHandler != nil {
+		return h.marginHandler.AdminRoutes()
+	}
+	return func(r chi.Router) {}
 }
 
 func (h *Handler) Routes() func(r chi.Router) {
@@ -92,6 +107,13 @@ func (h *Handler) convert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		minAmtOut = &val
+	}
+
+	if req.MaxSlippageBps != nil {
+		if err := ValidateSlippageToleranceBps(*req.MaxSlippageBps); err != nil {
+			api.BadRequest(w, err.Error())
+			return
+		}
 	}
 
 	conv, err := h.svc.ExecuteConversion(r.Context(), req.WalletID, req.QuoteID, minAmtOut, req.MaxSlippageBps)

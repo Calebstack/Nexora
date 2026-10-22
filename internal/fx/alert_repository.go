@@ -18,7 +18,9 @@ type AlertRepository interface {
 	Update(ctx context.Context, alert *domain.RateAlert) error
 	Delete(ctx context.Context, id, tenantID string) error
 	GetActiveAlertsForPair(ctx context.Context, fromAsset, toAsset string) ([]*domain.RateAlert, error)
+	GetAllActiveAlerts(ctx context.Context) ([]*domain.RateAlert, error)
 	RecordFiring(ctx context.Context, id string, rate decimal.Decimal) error
+	RecordFiringAtomicCAS(ctx context.Context, id string, rate decimal.Decimal, expectedLastFiredAt *time.Time) (bool, error)
 }
 
 type alertRepository struct {
@@ -149,6 +151,36 @@ func (r *alertRepository) GetActiveAlertsForPair(ctx context.Context, fromAsset,
 	return alerts, rows.Err()
 }
 
+func (r *alertRepository) GetAllActiveAlerts(ctx context.Context) ([]*domain.RateAlert, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, tenant_id, from_asset, to_asset, target_rate, direction,
+		       expires_at, last_fired_at, last_eval_rate, active, created_at, updated_at
+		FROM fx_rate_alerts
+		WHERE active = TRUE
+		  AND (expires_at IS NULL OR expires_at > NOW())
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var alerts []*domain.RateAlert
+	for rows.Next() {
+		alert := &domain.RateAlert{}
+		err := rows.Scan(
+			&alert.ID, &alert.TenantID, &alert.FromAsset, &alert.ToAsset, &alert.TargetRate,
+			&alert.Direction, &alert.ExpiresAt, &alert.LastFiredAt, &alert.LastEvalRate,
+			&alert.Active, &alert.CreatedAt, &alert.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		alerts = append(alerts, alert)
+	}
+
+	return alerts, rows.Err()
+}
+
 func (r *alertRepository) RecordFiring(ctx context.Context, id string, rate decimal.Decimal) error {
 	now := time.Now()
 	_, err := r.db.ExecContext(ctx, `
@@ -158,3 +190,34 @@ func (r *alertRepository) RecordFiring(ctx context.Context, id string, rate deci
 	`, now, rate, now, id)
 	return err
 }
+
+func (r *alertRepository) RecordFiringAtomicCAS(ctx context.Context, id string, rate decimal.Decimal, expectedLastFiredAt *time.Time) (bool, error) {
+	now := time.Now().UTC()
+	var query string
+	var args []interface{}
+	if expectedLastFiredAt == nil {
+		query = `
+			UPDATE fx_rate_alerts
+			SET last_fired_at = $1, last_eval_rate = $2, updated_at = $1
+			WHERE id = $3 AND active = TRUE AND last_fired_at IS NULL
+		`
+		args = []interface{}{now, rate, id}
+	} else {
+		query = `
+			UPDATE fx_rate_alerts
+			SET last_fired_at = $1, last_eval_rate = $2, updated_at = $1
+			WHERE id = $3 AND active = TRUE AND last_fired_at = $4
+		`
+		args = []interface{}{now, rate, id, *expectedLastFiredAt}
+	}
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+

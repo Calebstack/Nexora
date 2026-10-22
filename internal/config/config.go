@@ -79,6 +79,8 @@ type Config struct {
 	ComplianceReloadMinutes         int
 	WorkerEnabled                   bool
 	WebhookAllowPrivateNetworks     bool
+	// RateLockExpiryInterval specifies the recurring interval for the rate lock expiration daemon (e.g. "@every 30s").
+	RateLockExpiryInterval string
 	// ClaimableBalanceSourceWalletID funds claimable balances whose request did
 	// not name a source wallet.
 	ClaimableBalanceSourceWalletID string
@@ -441,6 +443,7 @@ func Load() (*Config, error) {
 		IndexerStreamShardCount:         viper.GetInt("INDEXER_STREAM_SHARD_COUNT"),
 		IndexerStreamShardIndex:         viper.GetInt("INDEXER_STREAM_SHARD_INDEX"),
 		IndexerMetricsPort:              viper.GetString("INDEXER_METRICS_PORT"),
+		RateLockExpiryInterval:          viper.GetString("RATE_LOCK_EXPIRY_INTERVAL"),
 		ClaimableBalanceSourceWalletID:  viper.GetString("CLAIMABLE_BALANCE_SOURCE_WALLET_ID"),
 		IdempotencyTTLHours: func() int {
 			h := viper.GetInt("IDEMPOTENCY_TTL_HOURS")

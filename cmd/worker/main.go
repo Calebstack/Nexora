@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Lumen-Nexora/Nexora/internal/compliance"
 	"github.com/Lumen-Nexora/Nexora/internal/config"
 	"github.com/Lumen-Nexora/Nexora/internal/fees"
+	"github.com/Lumen-Nexora/Nexora/internal/fx"
 	"github.com/Lumen-Nexora/Nexora/internal/indexer"
 	"github.com/Lumen-Nexora/Nexora/internal/logging"
 	"github.com/Lumen-Nexora/Nexora/internal/postgres"
@@ -279,6 +281,7 @@ func main() {
 		},
 	)
 	claimableWorker := claimable.NewWorker(claimableSvc)
+	rateLockExpirationWorker := fx.NewExpirationWorker(repoDB)
 
 	transferSvc := transfer.NewService(txRepo, walletRepo, feeSvc, qClient)
 
@@ -376,6 +379,7 @@ func main() {
 	mux.HandleFunc(queue.TypeRunSchedules, scheduleWorker.HandleRunSchedules)
 	mux.HandleFunc(queue.TypeTreasurySweep, treasuryWorker.HandleSweep)
 	mux.HandleFunc(queue.TypeExpireClaimableBalances, claimableWorker.HandleExpiry)
+	mux.HandleFunc(queue.TypeExpireRateLocks, rateLockExpirationWorker.HandleExpireLocks)
 	if complianceWorker != nil {
 		mux.HandleFunc(queue.TypeRefreshSanctions, complianceWorker.HandleRefreshSanctions)
 	}
@@ -423,6 +427,22 @@ func main() {
 	claimableExpiryTask := asynq.NewTask(queue.TypeExpireClaimableBalances, nil)
 	if _, err := scheduler.Register("@every 5m", claimableExpiryTask); err != nil {
 		log.Fatal().Err(err).Msg("register claimable balance expiry scheduler")
+	}
+
+	// Rate lock expiry daemon runs on a configurable interval (defaults to @every 30s)
+	// to identify expired rate locks in atomic batches of 100, transition status to expired,
+	// and release custodial balance holds with negligible CPU load.
+	rateLockExpiryInterval := "@every 30s"
+	if cfg.RateLockExpiryInterval != "" {
+		if strings.HasPrefix(cfg.RateLockExpiryInterval, "@") {
+			rateLockExpiryInterval = cfg.RateLockExpiryInterval
+		} else {
+			rateLockExpiryInterval = "@every " + cfg.RateLockExpiryInterval
+		}
+	}
+	rateLockExpiryTask := asynq.NewTask(queue.TypeExpireRateLocks, nil)
+	if _, err := scheduler.Register(rateLockExpiryInterval, rateLockExpiryTask); err != nil {
+		log.Fatal().Err(err).Msg("register rate lock expiry scheduler")
 	}
 
 	// The OFAC SDN list is republished on business days; a daily refresh on the

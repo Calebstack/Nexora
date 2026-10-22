@@ -1,6 +1,7 @@
 package fx
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Lumen-Nexora/Nexora/internal/domain"
@@ -9,14 +10,69 @@ import (
 
 // TestAlertFiresOncePerCrossing verifies alerts fire once when crossing threshold, not on every evaluation.
 func TestAlertFiresOncePerCrossing(t *testing.T) {
-	t.Skip("Implementation: alerts track last_eval_rate and only fire when crossing threshold")
-	// Acceptance criteria: Alerts fire at most once per threshold crossing, not once per evaluation
+	evaluator := NewAlertEvaluator(nil, nil, nil)
+	ctx := context.Background()
+
+	alert := &domain.RateAlert{
+		ID:         "alert-crossing-test",
+		TenantID:   "tenant-1",
+		FromAsset:  "USDC",
+		ToAsset:    "XLM",
+		TargetRate: decimal.RequireFromString("1.1000"),
+		Direction:  domain.AlertDirectionAtOrAbove,
+		Active:     true,
+	}
+	if err := evaluator.AddOrUpdateAlert(ctx, alert, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initial price 1.0500 (below target)
+	_, _ = evaluator.EvaluatePriceTick(ctx, "USDC:XLM", decimal.RequireFromString("1.0500"))
+
+	// Crosses threshold to 1.1200: should fire once
+	fired, err := evaluator.EvaluatePriceTick(ctx, "USDC:XLM", decimal.RequireFromString("1.1200"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 1 {
+		t.Fatalf("expected 1 fired alert on crossing, got %d", len(fired))
+	}
+
+	// Subsequent tick staying at 1.1500: should NOT fire again
+	fired, err = evaluator.EvaluatePriceTick(ctx, "USDC:XLM", decimal.RequireFromString("1.1500"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 0 {
+		t.Fatalf("expected 0 fired alerts when staying above threshold, got %d", len(fired))
+	}
 }
 
 // TestAlertDoesNotFireInsideThreshold verifies alerts don't fire when rate stays within threshold.
 func TestAlertDoesNotFireInsideThreshold(t *testing.T) {
-	t.Skip("Implementation: compare current rate with last_eval_rate and direction")
-	// Acceptance criteria: Alerts evaluated against rate source, fire only on crossing
+	evaluator := NewAlertEvaluator(nil, nil, nil)
+	ctx := context.Background()
+
+	alert := &domain.RateAlert{
+		ID:         "alert-inside-test",
+		TenantID:   "tenant-1",
+		FromAsset:  "USDC",
+		ToAsset:    "XLM",
+		TargetRate: decimal.RequireFromString("1.1000"),
+		Direction:  domain.AlertDirectionAtOrAbove,
+		Active:     true,
+	}
+	_ = evaluator.AddOrUpdateAlert(ctx, alert, false)
+
+	// Price moves from 1.0200 to 1.0800 (stays below 1.1000)
+	_, _ = evaluator.EvaluatePriceTick(ctx, "USDC:XLM", decimal.RequireFromString("1.0200"))
+	fired, err := evaluator.EvaluatePriceTick(ctx, "USDC:XLM", decimal.RequireFromString("1.0800"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 0 {
+		t.Fatalf("expected 0 fired alerts inside threshold, got %d", len(fired))
+	}
 }
 
 // TestAlertTenantIsolation ensures tenants cannot read other tenants' alerts.
@@ -27,8 +83,40 @@ func TestAlertTenantIsolation(t *testing.T) {
 
 // TestAlertWebhookDelivery verifies alerts trigger webhooks with proper event type.
 func TestAlertWebhookDelivery(t *testing.T) {
-	t.Skip("Implementation: webhook dispatcher sends fx.rate_alert.triggered event")
-	// Acceptance criteria: Delivery via existing webhook system with new event type
+	dispatcher := &mockWebhookDispatcher{}
+	evaluator := NewAlertEvaluator(nil, nil, dispatcher)
+	ctx := context.Background()
+
+	alert := &domain.RateAlert{
+		ID:         "alert-webhook-test",
+		TenantID:   "tenant-webhook-1",
+		FromAsset:  "USDC",
+		ToAsset:    "EURC",
+		TargetRate: decimal.RequireFromString("0.9200"),
+		Direction:  domain.AlertDirectionAtOrBelow,
+		Active:     true,
+	}
+	_ = evaluator.AddOrUpdateAlert(ctx, alert, false)
+
+	// Price moves 0.9500 -> 0.9000 (crosses below 0.9200)
+	_, _ = evaluator.EvaluatePriceTick(ctx, "USDC:EURC", decimal.RequireFromString("0.9500"))
+	fired, err := evaluator.EvaluatePriceTick(ctx, "USDC:EURC", decimal.RequireFromString("0.9000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 1 {
+		t.Fatalf("expected 1 fired alert, got %d", len(fired))
+	}
+
+	dispatcher.mu.Lock()
+	defer dispatcher.mu.Unlock()
+	if len(dispatcher.dispatched) != 1 {
+		t.Fatalf("expected 1 dispatched webhook, got %d", len(dispatcher.dispatched))
+	}
+	payload := dispatcher.dispatched[0]
+	if payload.AlertID != "alert-webhook-test" || payload.TenantID != "tenant-webhook-1" {
+		t.Fatalf("unexpected webhook payload: %+v", payload)
+	}
 }
 
 // TestRateLockHonored verifies locked rates are used end-to-end in conversions.
@@ -93,7 +181,10 @@ func TestAlertDirection(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Skip("Demonstrates alert firing logic based on direction and rate crossing")
+			got := ShouldFire(tc.direction, tc.targetRate, tc.currentRate, tc.lastEvalRate)
+			if got != tc.shouldFire {
+				t.Errorf("ShouldFire() = %v, want %v", got, tc.shouldFire)
+			}
 		})
 	}
 }

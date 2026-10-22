@@ -25,12 +25,21 @@ const (
 	// TypeExpireClaimableBalances sweeps claimable balances past their expiry
 	// and revokes the ones flagged revoke_on_expiry.
 	TypeExpireClaimableBalances = "claimable:expire"
+	// TypeExpireRateLocks periodically identifies expired, unconsumed rate locks,
+	// updates status to expired, and releases associated balance holds.
+	TypeExpireRateLocks = "fx:expire_locks"
 )
 
 type TraceContext struct {
 	TraceParent string `json:"traceparent,omitempty"`
 	TraceState  string `json:"tracestate,omitempty"`
 	Baggage     string `json:"baggage,omitempty"`
+}
+
+// ExpireRateLocksPayload contains optional trace context for rate lock cleanup sweeps.
+type ExpireRateLocksPayload struct {
+	BatchSize int           `json:"batch_size,omitempty"`
+	Trace     *TraceContext `json:"trace,omitempty"`
 }
 
 // The Trace fields are pointers so that `omitempty` actually elides them.

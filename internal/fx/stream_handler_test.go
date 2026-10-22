@@ -86,7 +86,7 @@ func TestQuoteStream_MultiplexesTenThousandSubscribersByPair(t *testing.T) {
 	stream := &QuoteStream{
 		fetch: func(context.Context, string, string) (*RateResponse, error) {
 			fetches.Add(1)
-			return &RateResponse{Rate: decimal.One}, nil
+			return &RateResponse{Rate: decimal.NewFromInt(1)}, nil
 		},
 		pairs:       make(map[string]*streamPair),
 		subscribers: make(map[uint64]*streamSubscriber),

@@ -33,6 +33,45 @@ func TestLockIsSingleUseUnderConcurrency(t *testing.T) {
 	}
 }
 
+func TestConsumeLockSingleUseUnder500Concurrency(t *testing.T) {
+	repo := NewLockRepository()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	repo.Put(RateLock{
+		ID:        "lock_500",
+		ExpiresAt: now.Add(30 * time.Second),
+	})
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successCount := 0
+	alreadyUsedCount := 0
+
+	for i := 0; i < 500; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			convID := "conv_req"
+			err := repo.ConsumeLock(ctx, "lock_500", convID)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				successCount++
+			} else if err == domain.ErrQuoteAlreadyUsed {
+				alreadyUsedCount++
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if successCount != 1 {
+		t.Fatalf("expected exactly 1 successful consumption across 500 concurrent requests, got %d", successCount)
+	}
+	if alreadyUsedCount != 499 {
+		t.Fatalf("expected exactly 499 ErrQuoteAlreadyUsed errors, got %d", alreadyUsedCount)
+	}
+}
+
 func TestLockExpiresEvenOneMillisecondAfterDeadline(t *testing.T) {
 	repo := NewLockRepository()
 	deadline := time.Now().UTC()

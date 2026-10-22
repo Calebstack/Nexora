@@ -362,16 +362,23 @@ func krakenPairCode(pair string) string {
 // StellarDEXSpotProvider queries Stellar DEX orderbook depth and price.
 type StellarDEXSpotProvider struct {
 	horizonURL string
+	issuer     string
 	client     *http.Client
 }
 
 // NewStellarDEXSpotProvider creates a new Stellar DEX spot provider.
 func NewStellarDEXSpotProvider(horizonURL string) *StellarDEXSpotProvider {
+	return NewStellarDEXSpotProviderWithIssuer(horizonURL, "")
+}
+
+// NewStellarDEXSpotProviderWithIssuer creates a Stellar DEX spot provider with a specified asset issuer.
+func NewStellarDEXSpotProviderWithIssuer(horizonURL, issuer string) *StellarDEXSpotProvider {
 	if horizonURL == "" {
 		horizonURL = "https://horizon.stellar.org"
 	}
 	return &StellarDEXSpotProvider{
 		horizonURL: strings.TrimRight(horizonURL, "/"),
+		issuer:     issuer,
 		client:     &http.Client{Timeout: oracleHTTPTimeout},
 	}
 }
@@ -385,7 +392,44 @@ func (s *StellarDEXSpotProvider) FetchTicker(ctx context.Context, pair string) (
 	if len(parts) != 2 {
 		return Ticker{}, fmt.Errorf("stellar_dex: invalid pair format %s", pair)
 	}
-	url := fmt.Sprintf("%s/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=%s", s.horizonURL, parts[1])
+	from, to := parts[0], parts[1]
+
+	var query string
+	if from == "XLM" {
+		assetType := "credit_alphanum4"
+		if len(to) > 4 {
+			assetType = "credit_alphanum12"
+		}
+		query = fmt.Sprintf("selling_asset_type=native&buying_asset_type=%s&buying_asset_code=%s", assetType, to)
+		if s.issuer != "" {
+			query += fmt.Sprintf("&buying_asset_issuer=%s", s.issuer)
+		}
+	} else if to == "XLM" {
+		assetType := "credit_alphanum4"
+		if len(from) > 4 {
+			assetType = "credit_alphanum12"
+		}
+		query = fmt.Sprintf("selling_asset_type=%s&selling_asset_code=%s&buying_asset_type=native", assetType, from)
+		if s.issuer != "" {
+			query += fmt.Sprintf("&selling_asset_issuer=%s", s.issuer)
+		}
+	} else {
+		// Non-native pair
+		fromType := "credit_alphanum4"
+		if len(from) > 4 {
+			fromType = "credit_alphanum12"
+		}
+		toType := "credit_alphanum4"
+		if len(to) > 4 {
+			toType = "credit_alphanum12"
+		}
+		query = fmt.Sprintf("selling_asset_type=%s&selling_asset_code=%s&buying_asset_type=%s&buying_asset_code=%s", fromType, from, toType, to)
+		if s.issuer != "" {
+			query += fmt.Sprintf("&buying_asset_issuer=%s", s.issuer)
+		}
+	}
+
+	url := fmt.Sprintf("%s/order_book?%s", s.horizonURL, query)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Ticker{}, fmt.Errorf("stellar_dex request: %w", err)
@@ -412,25 +456,40 @@ func (s *StellarDEXSpotProvider) FetchTicker(ctx context.Context, pair string) (
 	if err := json.NewDecoder(resp.Body).Decode(&book); err != nil {
 		return Ticker{}, fmt.Errorf("stellar_dex decode: %w", err)
 	}
-	if len(book.Asks) == 0 {
+	if len(book.Asks) == 0 && len(book.Bids) == 0 {
 		return Ticker{}, fmt.Errorf("stellar_dex: empty orderbook for %s", pair)
 	}
 
-	bestAsk, err := decimal.NewFromString(book.Asks[0].Price)
-	if err != nil {
-		return Ticker{}, fmt.Errorf("stellar_dex parse price: %w", err)
-	}
+	var price decimal.Decimal
 	vol := decimal.Zero
-	for _, ask := range book.Asks {
-		if amt, err := decimal.NewFromString(ask.Amount); err == nil {
-			vol = vol.Add(amt)
+	if len(book.Asks) > 0 {
+		bestAsk, err := decimal.NewFromString(book.Asks[0].Price)
+		if err != nil {
+			return Ticker{}, fmt.Errorf("stellar_dex parse price: %w", err)
+		}
+		price = bestAsk
+		for _, ask := range book.Asks {
+			if amt, err := decimal.NewFromString(ask.Amount); err == nil {
+				vol = vol.Add(amt)
+			}
+		}
+	} else {
+		bestBid, err := decimal.NewFromString(book.Bids[0].Price)
+		if err != nil {
+			return Ticker{}, fmt.Errorf("stellar_dex parse price: %w", err)
+		}
+		price = bestBid
+		for _, bid := range book.Bids {
+			if amt, err := decimal.NewFromString(bid.Amount); err == nil {
+				vol = vol.Add(amt)
+			}
 		}
 	}
 
 	return Ticker{
 		Source:    s.Name(),
 		Pair:      pair,
-		Price:     bestAsk,
+		Price:     price,
 		Volume:    vol,
 		Timestamp: time.Now().UTC(),
 	}, nil
