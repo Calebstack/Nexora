@@ -56,7 +56,7 @@ type service struct {
 	rateCache      *RateCache
 	volatility     *VolatilityEngine
 	triangulation  *TriangulationDetector
-	marginEngine   MarginEngine
+	lockRepo       LockRepository
 	usdcIssuer     string
 	providers      []Provider
 	spreadBps      int
@@ -123,9 +123,14 @@ func (s *service) SetTriangulationDetector(d *TriangulationDetector) {
 	s.triangulation = d
 }
 
-// WithMarginEngine wires the multi-tenant custom FX markup engine.
-func (s *service) WithMarginEngine(engine MarginEngine) Service {
-	s.marginEngine = engine
+// SetLockRepository wires the rate lock repository into the service.
+func (s *service) SetLockRepository(repo LockRepository) {
+	s.lockRepo = repo
+}
+
+// WithLockRepository sets the rate lock repository and returns the service instance.
+func (s *service) WithLockRepository(repo LockRepository) *service {
+	s.lockRepo = repo
 	return s
 }
 
@@ -235,6 +240,57 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 		expectedOrg = *w.TenantID
 		hasTenant = "1"
 	}
+
+	// Check if quoteID corresponds to a bounded rate lock when LockRepository is configured.
+	if s.lockRepo != nil {
+		if lock, err := s.lockRepo.Get(ctx, quoteID, expectedOrg); err == nil && lock != nil {
+			// Enforce tenant isolation
+			if w.TenantID == nil || lock.TenantID != *w.TenantID {
+				return nil, domain.ErrQuoteOwnershipMismatch
+			}
+
+			// Sub-second precision expiration: even 1 millisecond after deadline returns QUOTE_EXPIRED
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			if !now.Before(lock.ExpiresAt.UTC().Truncate(time.Microsecond)) {
+				return nil, domain.ErrQuoteExpired
+			}
+
+			// Issue #210: Rate locks require min_amount_out to protect callers against slippage
+			if minAmountOut == nil {
+				return nil, fmt.Errorf("%w: min_amount_out is required for rate lock conversions", domain.ErrSlippageExceeded)
+			}
+
+			destAmt := lock.Amount.Mul(lock.LockedRate)
+			if destAmt.LessThan(*minAmountOut) {
+				return nil, fmt.Errorf("%w: destination amount %s is less than minimum required %s", domain.ErrSlippageExceeded, destAmt.String(), minAmountOut.String())
+			}
+
+			convID := uuid.New().String()
+			if err := s.lockRepo.ConsumeLock(ctx, lock.ID, convID); err != nil {
+				return nil, err
+			}
+
+			conv := &domain.Conversion{
+				ID:             convID,
+				WalletID:       walletID,
+				SourceAsset:    lock.FromAsset,
+				DestAsset:      lock.ToAsset,
+				SourceAmount:   lock.Amount,
+				DestAmount:     destAmt,
+				Rate:           lock.LockedRate,
+				MinAmountOut:   minAmountOut,
+				MaxSlippageBps: maxSlippageBps,
+				RateLockID:     &lock.ID,
+				CreatedAt:      now,
+			}
+			if err := s.conversionRepo.Create(ctx, conv); err != nil {
+				return nil, fmt.Errorf("persist conversion: %w", err)
+			}
+
+			return conv, nil
+		}
+	}
+
 	result, err := markUsedScript.Run(ctx, s.redis,
 		[]string{quoteKeyPrefix + quoteID}, expectedOrg, hasTenant).Result()
 	if err != nil {
@@ -278,10 +334,9 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 	}
 
 	if maxSlippageBps != nil {
-		// For a fixed quote, the rate is already locked.
-		// If we want to check slippage against current market rate, we would fetch it here.
-		// However, typically slippage is compared to the quote rate if it was a floating quote.
-		// We just persist it since the quote is guaranteed and fixed.
+		if err := ValidateSlippageToleranceBps(*maxSlippageBps); err != nil {
+			return nil, err
+		}
 	}
 
 	conv := &domain.Conversion{

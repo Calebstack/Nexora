@@ -52,13 +52,16 @@ type streamPair struct {
 // connection; the handler goroutine is released as soon as a client leaves.
 type QuoteStream struct {
 	mu          sync.Mutex
-	fetch       rateFetcher
-	pairs       map[string]*streamPair
-	subscribers map[uint64]*streamSubscriber
-	nextID      uint64
-	done        chan struct{}
-	closeOnce   sync.Once
+	fetch          rateFetcher
+	pairs          map[string]*streamPair
+	subscribers    map[uint64]*streamSubscriber
+	nextID         uint64
+	maxConnections int
+	done           chan struct{}
+	closeOnce      sync.Once
 }
+
+const DefaultMaxConcurrentStreamConnections = 10_000
 
 func NewQuoteStream(svc Service) *QuoteStream {
 	var fetch rateFetcher
@@ -69,13 +72,21 @@ func NewQuoteStream(svc Service) *QuoteStream {
 		}
 	}
 	s := &QuoteStream{
-		fetch:       fetch,
-		pairs:       make(map[string]*streamPair),
-		subscribers: make(map[uint64]*streamSubscriber),
-		done:        make(chan struct{}),
+		fetch:          fetch,
+		pairs:          make(map[string]*streamPair),
+		subscribers:    make(map[uint64]*streamSubscriber),
+		maxConnections: DefaultMaxConcurrentStreamConnections,
+		done:           make(chan struct{}),
 	}
 	go s.run()
 	return s
+}
+
+// ActiveConnections returns the current number of active concurrent streaming clients.
+func (s *QuoteStream) ActiveConnections() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.subscribers)
 }
 
 func (s *QuoteStream) Close() {
@@ -266,6 +277,10 @@ func parseStreamDuration(raw string, fallback time.Duration) (time.Duration, err
 func (h *Handler) streamQuotes(w http.ResponseWriter, r *http.Request) {
 	if h.stream == nil || h.stream.fetch == nil {
 		api.Error(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "FX quote streaming is unavailable")
+		return
+	}
+	if h.stream.maxConnections > 0 && h.stream.ActiveConnections() >= h.stream.maxConnections {
+		api.Error(w, http.StatusTooManyRequests, "CONNECTION_LIMIT_EXCEEDED", "maximum concurrent streaming connections reached")
 		return
 	}
 	pairs, err := parseStreamPairs(r)
