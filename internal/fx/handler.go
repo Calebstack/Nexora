@@ -94,6 +94,13 @@ func (h *Handler) convert(w http.ResponseWriter, r *http.Request) {
 		minAmtOut = &val
 	}
 
+	if req.MaxSlippageBps != nil {
+		if err := ValidateSlippageToleranceBps(*req.MaxSlippageBps); err != nil {
+			api.BadRequest(w, err.Error())
+			return
+		}
+	}
+
 	conv, err := h.svc.ExecuteConversion(r.Context(), req.WalletID, req.QuoteID, minAmtOut, req.MaxSlippageBps)
 	if err != nil {
 		api.HandleDomainError(w, err)

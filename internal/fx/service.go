@@ -263,10 +263,9 @@ func (s *service) ExecuteConversion(ctx context.Context, walletID, quoteID strin
 	}
 
 	if maxSlippageBps != nil {
-		// For a fixed quote, the rate is already locked.
-		// If we want to check slippage against current market rate, we would fetch it here.
-		// However, typically slippage is compared to the quote rate if it was a floating quote.
-		// We just persist it since the quote is guaranteed and fixed.
+		if err := ValidateSlippageToleranceBps(*maxSlippageBps); err != nil {
+			return nil, err
+		}
 	}
 
 	conv := &domain.Conversion{
