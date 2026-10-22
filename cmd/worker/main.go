@@ -391,10 +391,10 @@ func main() {
 		log.Fatal().Err(err).Msg("register ledger sync scheduler")
 	}
 
-	// Reconciliation runs every 5 minutes in the low-priority queue so it does
+	// Reconciliation runs every minute in the low-priority queue so it does
 	// not compete with live settlement tasks.
 	reconcileTask := asynq.NewTask(queue.TypeReconcile, nil, asynq.Queue("low"))
-	if _, err := scheduler.Register("@every 5m", reconcileTask); err != nil {
+	if _, err := scheduler.Register("@every 1m", reconcileTask); err != nil {
 		log.Fatal().Err(err).Msg("register reconcile scheduler")
 	}
 
