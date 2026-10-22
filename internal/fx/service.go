@@ -142,9 +142,25 @@ func (s *service) GetQuote(ctx context.Context, fromAsset, toAsset, amount strin
 		return nil, err
 	}
 
+	// Refuse to quote a pair whose automated quoting the sanity guard has
+	// suspended after a prior feed anomaly, before spending a provider call.
+	if s.sanity != nil && s.sanity.IsSuspended(fromAsset, toAsset) {
+		return nil, fmt.Errorf("%w: %s", domain.ErrQuotingSuspended, fromAsset+"-"+toAsset)
+	}
+
 	rateResp, err := s.GetRates(ctx, fromAsset, toAsset)
 	if err != nil {
 		return nil, err
+	}
+
+	// Inspect the outgoing quote for a negative/zero spread, an inverted or
+	// non-positive rate, or a mid outside the plausible historical corridor.
+	// The first violation suspends the pair and returns a typed error.
+	if s.sanity != nil {
+		snap := SnapshotFromMid(fromAsset, toAsset, rateResp.MidMarketRate, rateResp.SpreadBps, rateResp.Provider)
+		if err := s.sanity.Check(snap); err != nil {
+			return nil, err
+		}
 	}
 
 	if s.triangulation != nil {
